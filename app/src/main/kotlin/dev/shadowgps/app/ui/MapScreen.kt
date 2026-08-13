@@ -218,6 +218,7 @@ fun MapScreen(viewModel: MainViewModel) {
                         selectedIndex = state.selectedRouteIndex,
                         units = state.settings.units,
                         provisionalStart = state.provisionalStart,
+                        offline = state.routedOffline,
                         onSelect = viewModel::selectRoute,
                         onStart = viewModel::startNavigation,
                         onDismiss = viewModel::clearDestination,
@@ -250,8 +251,14 @@ fun MapScreen(viewModel: MainViewModel) {
         SettingsSheet(
             settings = state.settings,
             cacheBytes = viewModel.cacheSizeBytes(),
+            savedRegions = state.savedRegions,
+            regionDownload = state.regionDownload,
+            canSaveCurrentArea = state.viewport != null,
             onUpdate = viewModel::updateSettings,
             onClearCache = viewModel::clearDownloadedData,
+            onSaveCurrentArea = { viewModel.saveCurrentViewport() },
+            onRefreshRegion = viewModel::refreshRegion,
+            onDeleteRegion = viewModel::deleteRegion,
             onDismiss = { showSettings = false },
         )
     }

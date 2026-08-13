@@ -8,6 +8,8 @@ import dev.shadowgps.core.graph.GraphBuilder
 import dev.shadowgps.core.graph.RoadGraph
 import dev.shadowgps.core.osm.OverpassQueries
 import dev.shadowgps.core.osm.parseOverpassResponse
+import dev.shadowgps.core.store.RegionMetadata
+import dev.shadowgps.core.store.RegionPayload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -17,7 +19,11 @@ class AreaData(
     val bounds: BoundingBox,
     val graph: RoadGraph,
     val detectors: List<Detector>,
-)
+    /** The saved region this came from, or null when it was downloaded for this trip. */
+    val savedRegion: SavedRegion? = null,
+) {
+    val isOffline: Boolean get() = savedRegion != null
+}
 
 /** Raised when the requested trip is too large to route on-device. */
 class AreaTooLargeException(val areaKm2: Double, val limitKm2: Double) :
@@ -32,6 +38,7 @@ class AreaTooLargeException(val areaKm2: Double, val limitKm2: Double) :
  */
 class MapDataRepository(
     private val overpass: OverpassClient,
+    private val regions: RegionStore,
 ) {
     /** The most recently built area, reused whenever the next trip fits inside it. */
     @Volatile
@@ -52,14 +59,83 @@ class MapDataRepository(
         maxAreaKm2: Double = MAX_AREA_KM2,
     ): AreaData {
         val box = BoundingBox.of(listOf(origin, destination)).expandMeters(paddingMeters)
-        if (box.areaKm2 > maxAreaKm2) throw AreaTooLargeException(box.areaKm2, maxAreaKm2)
 
+        // A saved region is checked before the size guard: the limit exists because
+        // downloading and building a huge area on the phone is painful, and a region that
+        // is already downloaded and already built is neither.
         cached?.let { if (it.bounds.contains(box)) return it }
+        loadFromSavedRegion(box)?.let {
+            cached = it
+            return it
+        }
+
+        if (box.areaKm2 > maxAreaKm2) throw AreaTooLargeException(box.areaKm2, maxAreaKm2)
 
         val area = load(box)
         cached = area
         return area
     }
+
+    /** Uses a saved region when one covers [box], so the trip needs no network at all. */
+    private suspend fun loadFromSavedRegion(box: BoundingBox): AreaData? {
+        val region = regions.regionCovering(box) ?: return null
+        return runCatching {
+            val payload = regions.load(region)
+            AreaData(
+                bounds = payload.metadata.bounds,
+                graph = payload.graph,
+                detectors = payload.detectors,
+                savedRegion = region,
+            )
+        }.getOrElse {
+            // A region that will not open is worse than none: drop it so the trip falls
+            // through to a download instead of failing outright.
+            regions.delete(region.id)
+            null
+        }
+    }
+
+    /**
+     * Downloads an area and stores it for offline use.
+     *
+     * @param onProgress reports which stage is running, for a screen the user is watching.
+     */
+    suspend fun downloadRegion(
+        id: String,
+        name: String,
+        box: BoundingBox,
+        maxAreaKm2: Double = MAX_REGION_AREA_KM2,
+        onProgress: (RegionProgress) -> Unit = {},
+    ): SavedRegion {
+        if (box.areaKm2 > maxAreaKm2) throw AreaTooLargeException(box.areaKm2, maxAreaKm2)
+
+        onProgress(RegionProgress.ROADS)
+        val roadsJson = overpass.query(OverpassQueries.roadNetwork(box, timeoutSeconds = 180), FRESH_ONLY)
+
+        onProgress(RegionProgress.CAMERAS)
+        val surveillanceJson = overpass.query(OverpassQueries.surveillance(box, timeoutSeconds = 120), FRESH_ONLY)
+
+        onProgress(RegionProgress.BUILDING)
+        val payload = withContext(Dispatchers.Default) {
+            val graph = GraphBuilder.build(parseOverpassResponse(roadsJson).elements)
+            val detectors = DetectorParser.parseAll(parseOverpassResponse(surveillanceJson).elements)
+            RegionPayload(
+                metadata = RegionMetadata(name = name, bounds = box, createdAtMillis = System.currentTimeMillis()),
+                graph = graph,
+                detectors = detectors,
+            )
+        }
+
+        onProgress(RegionProgress.SAVING)
+        val saved = regions.save(id, name, box, payload)
+
+        // The freshly built graph is almost certainly what the next trip wants.
+        cached = AreaData(box, payload.graph, payload.detectors, saved)
+        return saved
+    }
+
+    /** Stages of a region download, for progress reporting. */
+    enum class RegionProgress { ROADS, CAMERAS, BUILDING, SAVING }
 
     /** Loads one explicit box, e.g. to show cameras around the map view. */
     suspend fun load(box: BoundingBox): AreaData = withContext(Dispatchers.Default) {
@@ -101,7 +177,19 @@ class MapDataRepository(
         /** On-device routing budget. Beyond this the graph stops fitting comfortably in RAM. */
         const val MAX_AREA_KM2 = 4_000.0
 
+        /**
+         * Cap on a deliberately saved region.
+         *
+         * Larger than a single trip's allowance because the user asked for this one and is
+         * watching it download, but still bounded by having to hold the built graph in
+         * memory when the region is opened.
+         */
+        const val MAX_REGION_AREA_KM2 = 12_000.0
+
         private const val ROAD_CACHE_MILLIS = 14L * 24 * 60 * 60 * 1000
         private const val DETECTOR_CACHE_MILLIS = 3L * 24 * 60 * 60 * 1000
+
+        /** A region the user asked for should be current, not whatever is lying in the cache. */
+        private const val FRESH_ONLY = 0L
     }
 }

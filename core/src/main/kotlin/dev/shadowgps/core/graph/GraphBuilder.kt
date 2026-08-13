@@ -80,26 +80,12 @@ object GraphBuilder {
             buildEdgesForWay(way, nodePositions, nodeIndex, edges)
         }
 
-        val nodeCount = latList.size
-        val offsets = IntArray(nodeCount + 1)
-        for (edge in edges) offsets[edge.fromNode + 1]++
-        for (i in 1..nodeCount) offsets[i] += offsets[i - 1]
-
-        val cursor = offsets.copyOf()
-        val adjacency = IntArray(edges.size)
-        for (edge in edges) {
-            adjacency[cursor[edge.fromNode]++] = edge.index
-        }
-
-        return RoadGraph(
-            nodeCount = nodeCount,
+        return RoadGraph.assemble(
             nodeLat = latList.toDoubleArray(),
             nodeLon = lonList.toDoubleArray(),
             nodeDelaySeconds = delayList.toDoubleArray(),
             osmNodeIds = osmIdList.toLongArray(),
             edges = edges,
-            adjacencyOffsets = offsets,
-            adjacencyEdges = adjacency,
         )
     }
 

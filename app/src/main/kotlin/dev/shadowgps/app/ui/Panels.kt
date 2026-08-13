@@ -15,15 +15,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.NearMe
 import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Videocam
@@ -55,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.shadowgps.app.data.AppSettings
 import dev.shadowgps.app.data.Place
+import dev.shadowgps.app.data.SavedRegion
 import dev.shadowgps.app.ui.theme.ShadowColors
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.format.Formatting
@@ -181,6 +187,7 @@ fun RouteChooser(
     selectedIndex: Int,
     units: UnitSystem,
     provisionalStart: ProvisionalStart?,
+    offline: Boolean,
     onSelect: (Int) -> Unit,
     onStart: () -> Unit,
     onDismiss: () -> Unit,
@@ -198,6 +205,14 @@ fun RouteChooser(
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Choose a route", style = MaterialTheme.typography.titleMedium)
+                if (offline) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "· from a saved map",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Clear,
+                    )
+                }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "Cancel")
@@ -581,8 +596,14 @@ private fun remainingExposureLabel(navigation: NavigationState): String {
 fun SettingsSheet(
     settings: AppSettings,
     cacheBytes: Long,
+    savedRegions: List<SavedRegion>,
+    regionDownload: RegionDownloadState?,
+    canSaveCurrentArea: Boolean,
     onUpdate: ((AppSettings) -> AppSettings) -> Unit,
     onClearCache: () -> Unit,
+    onSaveCurrentArea: () -> Unit,
+    onRefreshRegion: (SavedRegion) -> Unit,
+    onDeleteRegion: (SavedRegion) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -590,10 +611,24 @@ fun SettingsSheet(
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             Modifier
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            OfflineMapsSection(
+                regions = savedRegions,
+                download = regionDownload,
+                canSaveCurrentArea = canSaveCurrentArea,
+                onSaveCurrentArea = onSaveCurrentArea,
+                onRefresh = onRefreshRegion,
+                onDelete = onDeleteRegion,
+            )
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(16.dp))
+
             Text("Avoid", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Routes take detours around whatever is switched on here. Everything else is " +
@@ -682,6 +717,140 @@ fun SettingsSheet(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * Managing areas kept on the device.
+ *
+ * Two things earn their place here beyond a list: the size, because these files are tens of
+ * megabytes and the user should be able to see what they are spending, and the age, because
+ * a saved region freezes camera positions at the moment it was downloaded and plate readers
+ * get relocated constantly. A month-old region still routes perfectly well but should not
+ * be trusted on coverage, and saying so is more honest than a silent stale map.
+ */
+@Composable
+private fun OfflineMapsSection(
+    regions: List<SavedRegion>,
+    download: RegionDownloadState?,
+    canSaveCurrentArea: Boolean,
+    onSaveCurrentArea: () -> Unit,
+    onRefresh: (SavedRegion) -> Unit,
+    onDelete: (SavedRegion) -> Unit,
+) {
+    Text("Offline maps", style = MaterialTheme.typography.titleMedium)
+    Text(
+        "Keep an area on this device and trips inside it need no connection at all — no " +
+            "downloads, and nothing about the trip leaves the phone.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    if (download != null) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(download.message, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${download.areaKm2.toInt()} km² · this can take a few minutes",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+
+    if (regions.isEmpty() && download == null) {
+        Text(
+            "Nothing saved yet.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+    }
+
+    regions.forEach { region ->
+        SavedRegionRow(region = region, onRefresh = { onRefresh(region) }, onDelete = { onDelete(region) })
+        Spacer(Modifier.height(8.dp))
+    }
+
+    Spacer(Modifier.height(4.dp))
+    Button(
+        onClick = onSaveCurrentArea,
+        enabled = canSaveCurrentArea && download == null,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("Save the area shown on the map")
+    }
+    if (!canSaveCurrentArea) {
+        Text(
+            "Move or zoom the map to choose an area first.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SavedRegionRow(region: SavedRegion, onRefresh: () -> Unit, onDelete: () -> Unit) {
+    val stale = region.isStale()
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(region.name, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${region.fileBytes / (1024 * 1024)} MB · " +
+                            "${region.roadCount / 2} roads · ${region.detectorCount} cameras",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        when (val days = region.ageDays()) {
+                            0L -> "Downloaded today"
+                            1L -> "Downloaded yesterday"
+                            else -> "Downloaded $days days ago"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (stale) ShadowColors.Caution else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh ${region.name}")
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "Delete ${region.name}")
+                }
+            }
+
+            if (stale) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Cameras move. This copy is over a month old — refresh it before " +
+                        "relying on its coverage.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ShadowColors.Caution,
+                )
+            }
         }
     }
 }

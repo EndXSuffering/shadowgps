@@ -74,6 +74,23 @@ readings.
 them to — that is the entire point. The only network calls are OpenStreetMap data for an
 area, map tiles, and address search if you use it.
 
+### Offline maps
+
+Settings → **Offline maps** keeps an area on the device permanently. Any trip inside a
+saved region then needs no connection at all: no download, no waiting, and nothing about
+the trip touches the network.
+
+Regions store the *built* road graph rather than the OpenStreetMap JSON it came from, so
+opening one costs a read instead of parsing megabytes and rebuilding every junction.
+Coordinates are fixed-point at ~1 cm, road names go through a string table (a long street
+is hundreds of edges all carrying the same name), and the whole file is gzipped — around
+40 bytes per road segment in practice.
+
+Saved regions are kept in app storage that Android will not reclaim, which is the point:
+a map downloaded for a trip with no signal has to still be there when you get there. They
+are never expired automatically either — but **cameras move**, so each region shows its
+age and warns once it is over a month old. Refresh re-downloads in place.
+
 ## Repository layout
 
 ```

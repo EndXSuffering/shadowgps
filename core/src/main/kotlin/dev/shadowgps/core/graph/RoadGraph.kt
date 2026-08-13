@@ -209,5 +209,39 @@ class RoadGraph internal constructor(
 
         /** First neighbourhood examined; widened until something acceptable turns up. */
         const val INITIAL_PROBE_METERS: Double = 80.0
+
+        /**
+         * Builds the compressed-sparse-row adjacency and assembles a graph.
+         *
+         * Shared by the builder that reads OSM and the reader that loads a saved region, so
+         * a graph restored from disk is indistinguishable from a freshly built one.
+         */
+        internal fun assemble(
+            nodeLat: DoubleArray,
+            nodeLon: DoubleArray,
+            nodeDelaySeconds: DoubleArray,
+            osmNodeIds: LongArray,
+            edges: List<RoadEdge>,
+        ): RoadGraph {
+            val nodeCount = nodeLat.size
+            val offsets = IntArray(nodeCount + 1)
+            for (edge in edges) offsets[edge.fromNode + 1]++
+            for (i in 1..nodeCount) offsets[i] += offsets[i - 1]
+
+            val cursor = offsets.copyOf()
+            val adjacency = IntArray(edges.size)
+            for (edge in edges) adjacency[cursor[edge.fromNode]++] = edge.index
+
+            return RoadGraph(
+                nodeCount = nodeCount,
+                nodeLat = nodeLat,
+                nodeLon = nodeLon,
+                nodeDelaySeconds = nodeDelaySeconds,
+                osmNodeIds = osmNodeIds,
+                edges = edges,
+                adjacencyOffsets = offsets,
+                adjacencyEdges = adjacency,
+            )
+        }
     }
 }

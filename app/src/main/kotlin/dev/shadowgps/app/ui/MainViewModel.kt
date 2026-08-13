@@ -6,11 +6,13 @@ import androidx.lifecycle.viewModelScope
 import dev.shadowgps.app.data.AppSettings
 import dev.shadowgps.app.data.AreaData
 import dev.shadowgps.app.data.AreaTooLargeException
+import dev.shadowgps.app.data.MapDataRepository
 import dev.shadowgps.app.data.DiskCache
 import dev.shadowgps.app.data.GeocodingClient
-import dev.shadowgps.app.data.MapDataRepository
 import dev.shadowgps.app.data.OverpassClient
 import dev.shadowgps.app.data.Place
+import dev.shadowgps.app.data.RegionStore
+import dev.shadowgps.app.data.SavedRegion
 import dev.shadowgps.app.data.SettingsStore
 import dev.shadowgps.app.location.LocationSource
 import dev.shadowgps.app.nav.NavigationBanner
@@ -49,6 +51,21 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+/** Progress of a region download the user is watching. */
+data class RegionDownloadState(
+    val name: String,
+    val stage: MapDataRepository.RegionProgress,
+    val areaKm2: Double,
+) {
+    val message: String
+        get() = when (stage) {
+            MapDataRepository.RegionProgress.ROADS -> "Downloading roads for $name…"
+            MapDataRepository.RegionProgress.CAMERAS -> "Downloading cameras for $name…"
+            MapDataRepository.RegionProgress.BUILDING -> "Building the map…"
+            MapDataRepository.RegionProgress.SAVING -> "Saving to this device…"
+        }
+}
+
 enum class Phase {
     /** Nothing chosen yet: the map and whatever cameras are nearby. */
     BROWSING,
@@ -86,6 +103,14 @@ data class MainUiState(
     val awaitingJoin: Boolean = false,
     /** Bumped to ask the map to jump back to the driver's position. */
     val recenterTick: Int = 0,
+    /** Areas kept on the device for offline routing. */
+    val savedRegions: List<SavedRegion> = emptyList(),
+    /** Non-null while a region is downloading. */
+    val regionDownload: RegionDownloadState? = null,
+    /** Set when the routes on screen came from a saved region rather than the network. */
+    val routedOffline: Boolean = false,
+    /** Whatever the map is currently showing, for "save this area". */
+    val viewport: BoundingBox? = null,
 ) {
     val selectedRoute: Route? get() = routes.getOrNull(selectedRouteIndex)
 
@@ -103,7 +128,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val cache = DiskCache(File(application.cacheDir, "osm-data"))
     private val overpass = OverpassClient(http, cache)
     private val geocoder = GeocodingClient(http, cache)
-    private val repository = MapDataRepository(overpass)
+
+    // Saved regions live in filesDir, not cacheDir: Android must not reclaim the map the
+    // user deliberately downloaded for a trip with no signal.
+    private val regionStore = RegionStore(application.filesDir)
+    private val repository = MapDataRepository(overpass, regionStore)
     private val settingsStore = SettingsStore(application)
     private val locationSource = LocationSource(application)
     private val speaker by lazy { Speaker(application) }
@@ -129,6 +158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             NavigationHub.stopRequests.collect { stopNavigation() }
         }
+        refreshSavedRegions()
         refreshPermissionState()
     }
 
@@ -348,6 +378,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         selectedRouteIndex = preferred,
                         detectors = loaded.detectors,
                         provisionalStart = plan.provisionalStart,
+                        routedOffline = loaded.isOffline,
                     )
                 }
             } catch (e: AreaTooLargeException) {
@@ -627,6 +658,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Loads the surveillance layer for whatever the map is currently showing. */
     fun loadDetectorsFor(box: BoundingBox) {
+        // Remembered so "save this area" has something to save.
+        _state.update { it.copy(viewport = box) }
         if (box.areaKm2 > DETECTOR_LAYER_MAX_KM2) return
         viewModelScope.launch {
             runCatching { repository.loadDetectors(box) }
@@ -638,6 +671,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
         }
     }
+
+    // ---------------------------------------------------------------- offline maps
+
+    fun refreshSavedRegions() {
+        viewModelScope.launch {
+            _state.update { it.copy(savedRegions = regionStore.list()) }
+        }
+    }
+
+    /**
+     * Downloads and keeps an area so later trips inside it need no network.
+     *
+     * @param box the area to keep; typically the current map view
+     * @param name what to call it in the list
+     * @param id supply an existing region's id to refresh it in place
+     */
+    fun saveRegion(box: BoundingBox, name: String, id: String = newRegionId()) {
+        if (_state.value.regionDownload != null) return
+
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    regionDownload = RegionDownloadState(name, MapDataRepository.RegionProgress.ROADS, box.areaKm2),
+                    error = null,
+                )
+            }
+            try {
+                repository.downloadRegion(id = id, name = name, box = box) { stage ->
+                    _state.update { current ->
+                        current.copy(regionDownload = current.regionDownload?.copy(stage = stage))
+                    }
+                }
+                _state.update { it.copy(savedRegions = regionStore.list(), regionDownload = null) }
+            } catch (e: AreaTooLargeException) {
+                failRegion(
+                    "That area is ${e.areaKm2.toInt()} km², larger than the " +
+                        "${e.limitKm2.toInt()} km² a saved map can hold. Zoom in and try again.",
+                )
+            } catch (e: IOException) {
+                failRegion(e.message ?: "Could not download that area.")
+            } catch (e: OutOfMemoryError) {
+                failRegion("Not enough memory to build a map that large. Zoom in and try again.")
+            }
+        }
+    }
+
+    /**
+     * Saves whatever the map is showing, named after the place at its centre.
+     *
+     * Asking the user to type a name before anything happens would be friction for no
+     * benefit; a reverse-geocoded name is right nearly always, and coordinates are a
+     * serviceable fallback when the lookup is unavailable — including when it is
+     * unavailable precisely because there is no connection.
+     */
+    fun saveCurrentViewport() {
+        val box = _state.value.viewport ?: return
+        viewModelScope.launch {
+            val name = geocoder.reverse(box.center)?.shortName ?: "Saved area"
+            saveRegion(box, name)
+        }
+    }
+
+    fun deleteRegion(region: SavedRegion) {
+        viewModelScope.launch {
+            regionStore.delete(region.id)
+            repository.forget()
+            _state.update { it.copy(savedRegions = regionStore.list()) }
+        }
+    }
+
+    /** Re-downloads a saved region in place, which is how camera data gets refreshed. */
+    fun refreshRegion(region: SavedRegion) = saveRegion(region.bounds, region.name, region.id)
+
+    private fun failRegion(message: String) =
+        _state.update { it.copy(regionDownload = null, error = message) }
+
+    private fun newRegionId(): String = "region-${System.currentTimeMillis()}"
 
     // ---------------------------------------------------------------- settings
 

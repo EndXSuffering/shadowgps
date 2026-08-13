@@ -5,6 +5,7 @@ import android.graphics.drawable.Drawable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
@@ -103,6 +104,11 @@ fun MapCanvas(
             overlays.add(pinLayer)
             overlays.add(vehicleLayer)
 
+            // The viewport is meaningless until the view has been measured, and nothing
+            // else reports it until the user pans — which would leave "save this area"
+            // with no area for as long as they leave the map alone.
+            addOnFirstLayoutListener { _, _, _, _, _ -> viewportGuard.onMoved(this@apply) }
+
             addMapListener(
                 object : MapListener {
                     override fun onScroll(event: ScrollEvent?): Boolean {
@@ -195,9 +201,19 @@ fun MapCanvas(
         vehicleLayer.items.add(vehicle)
     }
 
+    // osmdroid restores whatever centre it last persisted, which on a first run is the
+    // middle of the ocean. Move to the driver once, the first time we know where they are.
+    val centredOnUser = remember { mutableStateOf(false) }
+
     // The hot path: one marker moves, nothing is rebuilt.
     LaunchedEffect(userFix, followUser) {
         val fix = userFix ?: return@LaunchedEffect
+
+        if (!centredOnUser.value) {
+            centredOnUser.value = true
+            mapView.controller.setZoom(16.0)
+            mapView.controller.setCenter(GeoPoint(fix.position.lat, fix.position.lon))
+        }
 
         vehicle.position = GeoPoint(fix.position.lat, fix.position.lon)
         vehicle.rotation = -(fix.bearingDegrees?.toFloat() ?: 0f)
