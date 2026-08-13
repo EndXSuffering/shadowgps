@@ -116,7 +116,9 @@ class RegionStore(root: File) {
 
     private fun readIndex(): RegionIndex {
         if (!indexFile.exists()) return RegionIndex()
-        val stored = runCatching { json.decodeFromString<RegionIndex>(indexFile.readText()) }
+        // Explicit serializers rather than the reified helpers: those are extensions that
+        // resolve differently depending on which kotlinx.serialization imports are present.
+        val stored = runCatching { json.decodeFromString(RegionIndex.serializer(), indexFile.readText()) }
             .getOrElse { return RegionIndex() }
 
         // Drop entries whose file went missing — a restore, a manual clear, an interrupted
@@ -127,6 +129,6 @@ class RegionStore(root: File) {
     }
 
     private fun writeIndex(index: RegionIndex) {
-        runCatching { indexFile.writeText(json.encodeToString(index)) }
+        runCatching { indexFile.writeText(json.encodeToString(RegionIndex.serializer(), index)) }
     }
 }
