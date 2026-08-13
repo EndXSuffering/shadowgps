@@ -281,7 +281,7 @@ private fun polylineFor(map: MapView, route: Route, selected: Boolean): Polyline
  * ones without get a full circle, matching how the router treats them.
  */
 private fun coverageShape(map: MapView, detector: Detector): Polygon {
-    val tint = colorFor(detector.kind).toArgb()
+    val tint = colorFor(detector.kind)
     return Polygon(map).apply {
         points = when (val heading = detector.headingDegrees) {
             null -> Polygon.pointsAsCircle(
@@ -291,8 +291,10 @@ private fun coverageShape(map: MapView, detector: Detector): Polygon {
 
             else -> wedge(detector.position, heading, detector.fovDegrees, detector.rangeMeters)
         }
-        fillPaint.color = tint and 0x00FFFFFF or 0x33000000
-        outlinePaint.color = tint and 0x00FFFFFF or 0x88000000
+        // Translucent enough to read the road underneath, since overlapping cameras are
+        // common and their shapes stack.
+        fillPaint.color = tint.copy(alpha = 0.20f).toArgb()
+        outlinePaint.color = tint.copy(alpha = 0.55f).toArgb()
         outlinePaint.strokeWidth = 2f
         infoWindow = null
     }
