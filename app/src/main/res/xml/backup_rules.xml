@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Preferences are the only thing worth restoring onto a new device, and the only thing
+  safe to. Naming an <include> makes everything not listed ineligible, so the cached
+  OSM data and any trace of where the user has been stay out of the backup without
+  needing an explicit <exclude> — which lint rejects for a domain that was never
+  included in the first place.
+-->
 <full-backup-content>
-    <!-- Keep preferences, but never ship a backup of where the user has been. -->
     <include domain="sharedpref" path="shadowgps_settings.xml" />
-    <exclude domain="file" path="." />
-    <exclude domain="database" path="." />
 </full-backup-content>

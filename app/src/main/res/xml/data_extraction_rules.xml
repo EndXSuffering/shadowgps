@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ equivalent of backup_rules.xml. Same reasoning: listing an <include>
+  makes everything else ineligible, so downloaded map data and location history are
+  carried by neither cloud backup nor device-to-device transfer.
+-->
 <data-extraction-rules>
     <cloud-backup>
         <include domain="sharedpref" path="shadowgps_settings.xml" />
-        <exclude domain="file" path="." />
     </cloud-backup>
     <device-transfer>
         <include domain="sharedpref" path="shadowgps_settings.xml" />
-        <exclude domain="file" path="." />
     </device-transfer>
 </data-extraction-rules>

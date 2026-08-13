@@ -56,6 +56,19 @@ jobs:
       - name: Lint
         run: ./gradlew :app:lintDebug
 
+      # Gradle only echoes the first lint failure, which makes a run with several of
+      # them a guessing game.
+      - name: Show full lint report
+        if: failure()
+        run: cat app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: shadowgps-debug-apk
