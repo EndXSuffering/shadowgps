@@ -1,0 +1,594 @@
+package dev.shadowgps.app.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.NearMe
+import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import dev.shadowgps.app.data.AppSettings
+import dev.shadowgps.app.data.Place
+import dev.shadowgps.app.ui.theme.ShadowColors
+import dev.shadowgps.core.detect.DetectorKind
+import dev.shadowgps.core.format.Formatting
+import dev.shadowgps.core.format.UnitSystem
+import dev.shadowgps.core.nav.NavigationState
+import dev.shadowgps.core.routing.PrivacyProfile
+import dev.shadowgps.core.routing.Route
+
+/** Destination entry: a text field that turns into a list of matches. */
+@Composable
+fun SearchPanel(
+    query: String,
+    suggestions: List<Place>,
+    searching: Boolean,
+    destination: Place?,
+    onQueryChanged: (String) -> Unit,
+    onPick: (Place) -> Unit,
+    onClear: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            shadowElevation = 8.dp,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Rounded.Search,
+                    contentDescription = null,
+                    modifier = Modifier.padding(start = 16.dp).size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextField(
+                    value = query,
+                    onValueChange = onQueryChanged,
+                    placeholder = { Text(destination?.shortName ?: "Where to?") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                )
+                if (searching) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp).padding(end = 4.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+                if (query.isNotEmpty() || destination != null) {
+                    IconButton(onClick = onClear) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Clear")
+                    }
+                }
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Rounded.Shield, contentDescription = "Privacy settings")
+                }
+            }
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 8.dp,
+            ) {
+                LazyColumn(modifier = Modifier.heightIn(max = 280.dp)) {
+                    items(suggestions) { place ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(place) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Rounded.Place,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(place.shortName, style = MaterialTheme.typography.bodyLarge)
+                                place.detail?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The route chooser.
+ *
+ * Every option shows the same two numbers — time and cameras passed — because the whole
+ * decision this app exists to support is the trade between them.
+ */
+@Composable
+fun RouteChooser(
+    routes: List<Route>,
+    selectedIndex: Int,
+    units: UnitSystem,
+    onSelect: (Int) -> Unit,
+    onStart: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val baseline = routes.minOfOrNull { it.durationSeconds } ?: 0.0
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 12.dp,
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Choose a route", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Cancel")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            routes.forEachIndexed { index, route ->
+                RouteCard(
+                    route = route,
+                    selected = index == selectedIndex,
+                    baselineSeconds = baseline,
+                    units = units,
+                    onClick = { onSelect(index) },
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            Button(
+                onClick = onStart,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Icon(Icons.Rounded.NearMe, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Start", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RouteCard(
+    route: Route,
+    selected: Boolean,
+    baselineSeconds: Double,
+    units: UnitSystem,
+    onClick: () -> Unit,
+) {
+    val watched = route.exposure.totalCount
+    val tone = exposureTone(watched)
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
+        ),
+        border = if (selected) {
+            androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        },
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (route.profile == PrivacyProfile.FASTEST) Icons.Rounded.Bolt else Icons.Rounded.VisibilityOff,
+                contentDescription = null,
+                tint = if (route.profile == PrivacyProfile.FASTEST) ShadowColors.Caution else tone,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+
+            Column(Modifier.weight(1f)) {
+                Text(route.profile.label, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${Formatting.duration(route.durationSeconds)} · ${Formatting.distance(route.distanceMeters, units)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val delta = route.durationSeconds - baselineSeconds
+                if (delta > 30) {
+                    Text(
+                        Formatting.durationDelta(delta) + " slower",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            ExposureBadge(count = watched, tone = tone)
+        }
+    }
+}
+
+@Composable
+private fun ExposureBadge(count: Int, tone: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(tone.copy(alpha = 0.16f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (count == 0) {
+                Icon(Icons.Rounded.Shield, contentDescription = null, tint = tone, modifier = Modifier.size(22.dp))
+            } else {
+                Text(
+                    count.toString(),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = tone,
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            if (count == 0) "unseen" else "seen",
+            style = MaterialTheme.typography.labelMedium,
+            color = tone,
+        )
+    }
+}
+
+private fun exposureTone(count: Int): Color = when {
+    count == 0 -> ShadowColors.Clear
+    count <= 2 -> ShadowColors.Caution
+    else -> ShadowColors.Watched
+}
+
+/** The big instruction banner shown while driving. */
+@Composable
+fun NavigationInstructionCard(
+    navigation: NavigationState,
+    units: UnitSystem,
+    isRerouting: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val next = navigation.nextStep ?: navigation.currentStep
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 10.dp,
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Rounded.ArrowUpward,
+                    contentDescription = null,
+                    modifier = Modifier.size(34.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(
+                        Formatting.distance(navigation.distanceToManeuverMeters, units),
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Text(
+                        next?.instruction ?: "Continue",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            if (isRerouting) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Off route — finding another way…",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = ShadowColors.Caution,
+                )
+            }
+
+            val camera = navigation.detectorsAhead.firstOrNull {
+                it.alongRouteMeters > navigation.distanceAlongRouteMeters
+            }
+            if (camera != null) {
+                val distance = camera.alongRouteMeters - navigation.distanceAlongRouteMeters
+                if (distance < 1_000) {
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Rounded.Videocam,
+                            contentDescription = null,
+                            tint = colorFor(camera.detector.kind),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "${camera.detector.kind.label} in ${Formatting.distance(distance, units)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colorFor(camera.detector.kind),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Trip summary and the stop button, pinned to the bottom while driving. */
+@Composable
+fun NavigationFooter(
+    navigation: NavigationState,
+    route: Route,
+    units: UnitSystem,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 12.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    Formatting.duration(navigation.secondsRemaining),
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text(
+                    Formatting.distance(navigation.distanceRemainingMeters, units) +
+                        " · " + remainingExposureLabel(navigation),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "${route.profile.label} route",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(onClick = onStop, shape = RoundedCornerShape(12.dp)) {
+                Text("Stop")
+            }
+        }
+    }
+}
+
+private fun remainingExposureLabel(navigation: NavigationState): String {
+    val ahead = navigation.detectorsAhead.count { it.alongRouteMeters > navigation.distanceAlongRouteMeters }
+    return when (ahead) {
+        0 -> "nothing watching ahead"
+        1 -> "1 camera ahead"
+        else -> "$ahead cameras ahead"
+    }
+}
+
+/** What to avoid, and how the app should behave while driving. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsSheet(
+    settings: AppSettings,
+    cacheBytes: Long,
+    onUpdate: ((AppSettings) -> AppSettings) -> Unit,
+    onClearCache: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            Modifier
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("Avoid", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Routes take detours around whatever is switched on here. Everything else is " +
+                    "still drawn on the map, just not routed around.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+
+            DetectorKind.entries.forEach { kind ->
+                SettingRow(
+                    title = kind.label,
+                    subtitle = kindExplanation(kind),
+                    checked = kind in settings.avoidedKinds,
+                    accent = colorFor(kind),
+                    onCheckedChange = { enabled ->
+                        onUpdate { current ->
+                            val kinds = current.avoidedKinds.toMutableSet()
+                            if (enabled) kinds.add(kind) else kinds.remove(kind)
+                            current.copy(avoidedKinds = kinds)
+                        }
+                    },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(16.dp))
+
+            Text("While driving", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+
+            SettingRow(
+                title = "Speak directions",
+                subtitle = "Read turns aloud.",
+                checked = settings.speakDirections,
+                onCheckedChange = { on -> onUpdate { it.copy(speakDirections = on) } },
+            )
+            SettingRow(
+                title = "Warn about cameras",
+                subtitle = "Call out a device before you reach it.",
+                checked = settings.warnAboutCameras,
+                onCheckedChange = { on -> onUpdate { it.copy(warnAboutCameras = on) } },
+            )
+            SettingRow(
+                title = "Keep the screen on",
+                subtitle = "Stay awake while navigating.",
+                checked = settings.keepScreenOnWhileNavigating,
+                onCheckedChange = { on -> onUpdate { it.copy(keepScreenOnWhileNavigating = on) } },
+            )
+            SettingRow(
+                title = "Show coverage on the map",
+                subtitle = "Shade what each device can see.",
+                checked = settings.showAllDetectors,
+                onCheckedChange = { on -> onUpdate { it.copy(showAllDetectors = on) } },
+            )
+            SettingRow(
+                title = "Imperial units",
+                subtitle = "Miles and feet instead of kilometres and metres.",
+                checked = settings.units == UnitSystem.IMPERIAL,
+                onCheckedChange = { on ->
+                    onUpdate { it.copy(units = if (on) UnitSystem.IMPERIAL else UnitSystem.METRIC) }
+                },
+            )
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Downloaded map data", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${cacheBytes / (1024 * 1024)} MB stored on this device",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onClearCache) { Text("Clear") }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Routing runs on this phone. Your start and destination are never sent to a " +
+                    "routing server. Map and camera data come from OpenStreetMap.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun kindExplanation(kind: DetectorKind): String = when (kind) {
+    DetectorKind.ALPR -> "Records your plate, time and place, and keeps it."
+    DetectorKind.SPEED_CAMERA -> "Photographs vehicles that are speeding."
+    DetectorKind.RED_LIGHT_CAMERA -> "Photographs vehicles that jump the lights."
+    DetectorKind.CCTV -> "General traffic cameras watching a road."
+    DetectorKind.TOLL_GANTRY -> "Reads plates or transponders to bill you."
+}
+
+@Composable
+private fun SettingRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    accent: Color? = null,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (accent != null) {
+            Box(Modifier.size(10.dp).background(accent, CircleShape))
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ShadowGPS</string>
+
+    <string name="nav_channel_name">Turn-by-turn guidance</string>
+    <string name="nav_channel_description">Shows the next instruction while you are driving.</string>
+    <string name="nav_notification_title">Navigating</string>
+    <string name="nav_stop">Stop</string>
+</resources>

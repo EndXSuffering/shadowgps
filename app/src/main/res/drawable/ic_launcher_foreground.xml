@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A navigation arrow cutting across a camera's field of view. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#2A3340"
+        android:pathData="M54,30 L78,66 L54,58 L30,66 Z" />
+
+    <path
+        android:fillColor="#4ADE80"
+        android:pathData="M54,34 L74,64 L54,56 L34,64 Z" />
+
+    <path
+        android:fillColor="#F87171"
+        android:pathData="M40,74 h28 a3,3 0 0 1 3,3 v6 a3,3 0 0 1 -3,3 h-28 a3,3 0 0 1 -3,-3 v-6 a3,3 0 0 1 3,-3 z" />
+</vector>

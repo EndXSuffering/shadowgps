@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Heading arrow for the driver's own position; rotated to the current bearing. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="34dp"
+    android:height="34dp"
+    android:viewportWidth="34"
+    android:viewportHeight="34">
+    <path
+        android:fillColor="#0E1116"
+        android:pathData="M17,2 L28,30 L17,24 L6,30 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M17,5 L25.6,28 L17,23.2 L8.4,28 Z" />
+</vector>
