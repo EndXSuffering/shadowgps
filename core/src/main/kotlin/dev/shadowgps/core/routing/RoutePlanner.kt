@@ -35,6 +35,7 @@ class RoutePlanner(
         origin: LatLon,
         destination: LatLon,
         profiles: List<PrivacyProfile> = PrivacyProfile.entries,
+        originSnapMeters: Double = SnapRadius.DEFAULT_METERS,
     ): RoutePlan {
         val routes = ArrayList<Route>(profiles.size)
         var firstFailure: RouteFailure? = null
@@ -42,7 +43,7 @@ class RoutePlanner(
         val seenShapes = HashSet<List<Int>>()
 
         for (profile in profiles) {
-            when (val result = router.route(origin, destination, profile.secondsPerDetector)) {
+            when (val result = router.route(origin, destination, profile.secondsPerDetector, originSnapMeters)) {
                 is RouteSearchResult.Failed -> {
                     if (firstFailure == null) firstFailure = result.reason
                 }

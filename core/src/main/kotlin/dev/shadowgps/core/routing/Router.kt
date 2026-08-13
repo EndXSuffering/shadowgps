@@ -10,12 +10,35 @@ import kotlin.math.abs
 /** Knobs that shape the search itself, independent of how much privacy is being bought. */
 data class RoutingOptions(
     /** How far from a road a start or end point may sit before routing gives up. */
-    val maxSnapMeters: Double = 200.0,
+    val maxSnapMeters: Double = RoadGraph.DEFAULT_SNAP_METERS,
     /** Seconds charged for reversing direction; high enough to make u-turns a last resort. */
     val uTurnPenaltySeconds: Double = 90.0,
     /** Safety valve so a disconnected or enormous graph cannot spin forever. */
     val maxExpandedStates: Int = 2_000_000,
 )
+
+/**
+ * How far to look for a road, given how sure the device is about where it is.
+ *
+ * A phone indoors — which is exactly where a trip gets planned — often falls back to a
+ * network fix accurate to hundreds of metres, and that reported position can land in the
+ * middle of a field. Refusing to route because no road is within a fixed 200 m of a fix
+ * the device itself says is ±800 m makes the app useless in the one place it is used most.
+ * Snapping stays nearest-first, so a wider allowance only ever takes effect when there is
+ * genuinely nothing closer.
+ */
+object SnapRadius {
+    const val DEFAULT_METERS: Double = RoadGraph.DEFAULT_SNAP_METERS
+
+    /** Beyond this the snapped position is too speculative to route from honestly. */
+    const val MAX_METERS: Double = 2_000.0
+
+    fun forAccuracy(accuracyMeters: Double?): Double {
+        val accuracy = accuracyMeters ?: return DEFAULT_METERS
+        if (accuracy <= 0 || accuracy.isNaN()) return DEFAULT_METERS
+        return (accuracy * 1.5).coerceIn(DEFAULT_METERS, MAX_METERS)
+    }
+}
 
 /**
  * A route as the search produces it: a chain of directed edges plus where along the first
@@ -30,7 +53,14 @@ class RawRoute(
 )
 
 /** Why no route came back. */
-enum class RouteFailure { ORIGIN_UNREACHABLE, DESTINATION_UNREACHABLE, NO_PATH, SEARCH_EXHAUSTED }
+enum class RouteFailure {
+    /** The area has no road network at all — the download failed or returned nothing. */
+    NO_MAP_DATA,
+    ORIGIN_UNREACHABLE,
+    DESTINATION_UNREACHABLE,
+    NO_PATH,
+    SEARCH_EXHAUSTED,
+}
 
 sealed interface RouteSearchResult {
     data class Found(val route: RawRoute) : RouteSearchResult
@@ -63,8 +93,22 @@ class Router(
 
     private val maxSpeedMetersPerSecond = Speeds.MAX_PLAUSIBLE_KPH / 3.6
 
-    fun route(origin: LatLon, destination: LatLon, lambdaSeconds: Double): RouteSearchResult {
-        val originSnaps = graph.snap(origin, options.maxSnapMeters)
+    /**
+     * @param originSnapMeters how far from a road the start may sit. Worth widening when the
+     *   start came from a low-confidence location fix; see [SnapRadius].
+     */
+    fun route(
+        origin: LatLon,
+        destination: LatLon,
+        lambdaSeconds: Double,
+        originSnapMeters: Double = options.maxSnapMeters,
+    ): RouteSearchResult {
+        // Distinguishing "we have no map here" from "you are not near a road" matters: the
+        // first is a failed download the driver can retry, the second is about where they
+        // are standing, and telling them the wrong one sends them chasing the wrong fix.
+        if (graph.isEmpty) return RouteSearchResult.Failed(RouteFailure.NO_MAP_DATA)
+
+        val originSnaps = graph.snap(origin, maxOf(originSnapMeters, options.maxSnapMeters))
         if (originSnaps.isEmpty()) return RouteSearchResult.Failed(RouteFailure.ORIGIN_UNREACHABLE)
 
         val destinationSnaps = graph.snap(destination, options.maxSnapMeters)

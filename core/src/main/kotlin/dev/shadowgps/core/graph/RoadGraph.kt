@@ -140,27 +140,54 @@ class RoadGraph internal constructor(
      * direction pair, so a caller can seed a search from a point that could plausibly be on
      * either side of a dual carriageway. An empty list means nothing drivable is within
      * [maxDistanceMeters].
+     *
+     * The search starts small and widens. That is purely a cost optimisation — the grid is
+     * conservative, so a single query at [maxDistanceMeters] would already return every
+     * edge in range, but it would also mean projecting every road in a city block onto the
+     * point for the common case where one is a few metres away. Widening must therefore key
+     * off whether an *acceptable snap* was found, never off whether the grid handed back
+     * any candidates at all: a cell can easily contain nothing but a long road that passes
+     * hundreds of metres away, and stopping there would report no road while one sits just
+     * over the cell boundary.
      */
-    fun snap(point: LatLon, maxDistanceMeters: Double = 150.0, limit: Int = 4): List<EdgeSnap> {
-        var radius = 60.0
-        var candidates: List<Int> = emptyList()
-        while (radius <= maxDistanceMeters * 2 && candidates.isEmpty()) {
-            candidates = edgeIndexGrid.queryRadius(point, radius)
-            radius *= 2
-        }
-        if (candidates.isEmpty()) candidates = edgeIndexGrid.queryRadius(point, maxDistanceMeters * 2)
+    fun snap(
+        point: LatLon,
+        maxDistanceMeters: Double = DEFAULT_SNAP_METERS,
+        limit: Int = 4,
+    ): List<EdgeSnap> {
+        if (edges.isEmpty()) return emptyList()
 
-        return candidates
-            .asSequence()
+        var probe = INITIAL_PROBE_METERS
+        while (true) {
+            val reach = minOf(probe, maxDistanceMeters)
+            val found = snapWithin(point, reach, limit)
+            if (found.isNotEmpty()) return found
+            if (reach >= maxDistanceMeters) return emptyList()
+            probe *= 2
+        }
+    }
+
+    private fun snapWithin(point: LatLon, radiusMeters: Double, limit: Int): List<EdgeSnap> {
+        val roadsTaken = HashSet<Int>()
+        return edgeIndexGrid.queryRadius(point, radiusMeters)
             .map { EdgeSnap(it, edges[it].project(point)) }
-            .filter { it.distanceMeters <= maxDistanceMeters }
+            .filter { it.distanceMeters <= radiusMeters }
             .sortedBy { it.distanceMeters }
+            // Both directions of one road snap to the same place as far as a driver is
+            // concerned, so keeping both would spend the limit on one street. The router
+            // re-derives the opposite direction from the pairing anyway.
+            .filter { snap -> roadsTaken.add(roadKey(snap.edgeIndex)) }
             .take(limit)
-            .toList()
+    }
+
+    /** Identifies the physical road behind a directed edge, shared by both directions. */
+    private fun roadKey(edgeIndex: Int): Int {
+        val reverse = edges[edgeIndex].reverseIndex
+        return if (reverse >= 0) minOf(edgeIndex, reverse) else edgeIndex
     }
 
     /** The single closest drivable point, or null if the network does not reach [point]. */
-    fun snapNearest(point: LatLon, maxDistanceMeters: Double = 150.0): EdgeSnap? =
+    fun snapNearest(point: LatLon, maxDistanceMeters: Double = DEFAULT_SNAP_METERS): EdgeSnap? =
         snap(point, maxDistanceMeters, limit = 1).firstOrNull()
 
     /**
@@ -171,5 +198,16 @@ class RoadGraph internal constructor(
      */
     fun edgesIntersecting(box: BoundingBox): List<Int> = edgeIndexGrid.query(box)
 
+    /** True when nothing was built — an area with no downloaded roads. */
+    val isEmpty: Boolean get() = edges.isEmpty()
+
     override fun toString(): String = "RoadGraph($nodeCount nodes, $edgeCount directed edges)"
+
+    companion object {
+        /** How far a start or end point may sit from a road before routing gives up. */
+        const val DEFAULT_SNAP_METERS: Double = 200.0
+
+        /** First neighbourhood examined; widened until something acceptable turns up. */
+        const val INITIAL_PROBE_METERS: Double = 80.0
+    }
 }

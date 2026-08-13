@@ -108,6 +108,10 @@ as an artifact.
   and junction counts, so treat them as estimates.
 - Routing quality depends on the padding around your route (3 km by default). A detour
   that would need to swing wider than that will not be found.
+- **If your location fix is poor** — indoors, underground, or under tall buildings — the
+  app widens its search for a road to match the accuracy the device reports, up to 2 km.
+  If that still fails, long-press the map and choose **Start** to place the start point
+  yourself.
 
 ## Contributing camera data
 

@@ -1,5 +1,6 @@
 package dev.shadowgps.app.data
 
+import dev.shadowgps.core.osm.parseOverpassResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -47,6 +48,17 @@ class OverpassClient(
                     val text = response.body?.string().orEmpty()
                     when {
                         response.isSuccessful && text.isNotBlank() -> {
+                            // A server that ran out of time or memory still answers 200
+                            // with a valid but empty body. Caching that would poison the
+                            // area for days and make every route look like empty
+                            // countryside, so treat it as a failure and try the next
+                            // mirror instead.
+                            val remark = failureRemarkIn(text)
+                            if (remark != null) {
+                                lastError = OverpassException("Map data server overloaded: $remark")
+                                delay(BACKOFF_MILLIS * (attempt + 1))
+                                return@use
+                            }
                             cache.write(overpassQl, text)
                             return@withContext text
                         }
@@ -71,6 +83,17 @@ class OverpassClient(
             "Could not download map data. Check your connection and try again.",
             lastError,
         )
+    }
+
+    /**
+     * Looks for an Overpass failure remark without parsing the whole payload.
+     *
+     * A road download is megabytes of JSON and this runs on every response, so the cheap
+     * substring check gates the real parse.
+     */
+    private fun failureRemarkIn(body: String): String? {
+        if (!body.contains("\"remark\"")) return null
+        return runCatching { parseOverpassResponse(body).errorRemark }.getOrNull()
     }
 
     companion object {

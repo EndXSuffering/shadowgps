@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -36,8 +38,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.shadowgps.core.detect.Detector
+import dev.shadowgps.core.geo.LatLon
 
 /**
  * The whole app: a map with a search bar on top and a panel at the bottom whose contents
@@ -48,6 +52,7 @@ fun MapScreen(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var showSettings by remember { mutableStateOf(false) }
     var tappedDetector by remember { mutableStateOf<Detector?>(null) }
+    var pendingPin by remember { mutableStateOf<LatLon?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -73,7 +78,7 @@ fun MapScreen(viewModel: MainViewModel) {
             followUser = state.phase == Phase.NAVIGATING,
             showDetectorRanges = state.settings.showAllDetectors,
             recenterTick = state.recenterTick,
-            onLongPress = { position -> viewModel.chooseDestination(position) },
+            onLongPress = { position -> pendingPin = position },
             onDetectorTapped = { detector -> tappedDetector = detector },
             onViewportChanged = viewModel::loadDetectorsFor,
         )
@@ -110,6 +115,17 @@ fun MapScreen(viewModel: MainViewModel) {
                 )
             }
 
+            if (state.phase != Phase.NAVIGATING) {
+                state.origin?.let { origin ->
+                    Spacer(Modifier.height(8.dp))
+                    OriginChip(
+                        name = origin.shortName,
+                        onUseCurrentLocation = viewModel::useCurrentLocationAsOrigin,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
             state.busyMessage?.let { message ->
                 Spacer(Modifier.height(8.dp))
                 Surface(
@@ -136,6 +152,23 @@ fun MapScreen(viewModel: MainViewModel) {
                 .fillMaxWidth(),
             horizontalAlignment = Alignment.End,
         ) {
+            pendingPin?.let { position ->
+                PinChoiceCard(
+                    onStartHere = {
+                        viewModel.setOriginFromMap(position)
+                        pendingPin = null
+                    },
+                    onGoHere = {
+                        viewModel.chooseDestination(position)
+                        pendingPin = null
+                    },
+                    onDismiss = { pendingPin = null },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+
             tappedDetector?.let { detector ->
                 DetectorCard(
                     detector = detector,
@@ -210,6 +243,71 @@ fun MapScreen(viewModel: MainViewModel) {
     }
 }
 
+/**
+ * What to do with a long-pressed point.
+ *
+ * Offering the start as well as the destination is what rescues a driver whose location
+ * fix is unusable — an underground car park, a covered market, anywhere indoors.
+ */
+@Composable
+private fun PinChoiceCard(
+    onStartHere: () -> Unit,
+    onGoHere: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Use this point as",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onStartHere) { Text("Start") }
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick = onGoHere) { Text("Destination") }
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Rounded.Close, contentDescription = "Dismiss")
+            }
+        }
+    }
+}
+
+/** Shows a manually chosen start point, with the way back to the live position. */
+@Composable
+private fun OriginChip(name: String, onUseCurrentLocation: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Starting from $name",
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onUseCurrentLocation) { Text("Use my location") }
+        }
+    }
+}
+
 /** Details for a camera the user tapped on the map. */
 @Composable
 private fun DetectorCard(detector: Detector, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
@@ -251,9 +349,10 @@ private fun DetectorCard(detector: Detector, onDismiss: () -> Unit, modifier: Mo
 private fun HintCard(granted: Boolean, enabled: Boolean, modifier: Modifier = Modifier) {
     val message = when {
         !granted -> "Location access is off, so routes cannot start from where you are. " +
-            "You can still long-press the map to pick a destination."
-        !enabled -> "Location is switched off on this device."
-        else -> "Search for somewhere, or long-press the map to drop a destination."
+            "Long-press the map to set a start and a destination by hand."
+        !enabled -> "Location is switched off on this device. Long-press the map to set a " +
+            "start and a destination by hand."
+        else -> "Search for somewhere, or long-press the map to set a start or destination."
     }
 
     Surface(

@@ -14,7 +14,31 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class OverpassResponse(
     val elements: List<OsmElement> = emptyList(),
-)
+    /**
+     * How Overpass reports a query it could not finish.
+     *
+     * A timed-out or overloaded server still answers 200 with a well-formed body; the only
+     * sign of trouble is this field alongside an empty or partial `elements`. Taking that
+     * at face value caches an empty map for the area, which then surfaces to the driver as
+     * "no road near you" — a wrong and unactionable diagnosis.
+     */
+    val remark: String? = null,
+) {
+    /** The remark, when it describes a failure rather than an informational note. */
+    val errorRemark: String?
+        get() = remark?.takeIf { text ->
+            OVERPASS_FAILURE_HINTS.any { text.contains(it, ignoreCase = true) }
+        }
+}
+
+/**
+ * Wording Overpass uses when a query did not complete.
+ *
+ * Kept at file scope rather than in a companion: `@Serializable` generates its own
+ * `Companion` holding `serializer()`, and declaring a private one of our own makes that
+ * generated member inaccessible to the rest of the file.
+ */
+private val OVERPASS_FAILURE_HINTS = listOf("error", "timed out", "timeout", "out of memory")
 
 @Serializable
 data class OsmElement(

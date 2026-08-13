@@ -29,6 +29,7 @@ import dev.shadowgps.core.nav.PositionFix
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteFailure
 import dev.shadowgps.core.routing.RoutePlanner
+import dev.shadowgps.core.routing.SnapRadius
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -231,9 +232,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setOrigin(place: Place?) {
-        _state.update { it.copy(origin = place, routes = emptyList()) }
+        _state.update { it.copy(origin = place, routes = emptyList(), error = null) }
         if (_state.value.destination != null) planRoutes()
     }
+
+    /**
+     * Starts the trip from a point on the map instead of the device's own position.
+     *
+     * The escape hatch for a bad fix: underground car parks, tall buildings and any indoor
+     * planning session routinely put the reported location nowhere near a road, and without
+     * this the driver has no way past it.
+     */
+    fun setOriginFromMap(position: LatLon) {
+        viewModelScope.launch {
+            val place = geocoder.reverse(position) ?: Place(name = "Chosen start", position = position)
+            setOrigin(place.copy(name = place.shortName))
+        }
+    }
+
+    /** Goes back to routing from wherever the device thinks it is. */
+    fun useCurrentLocationAsOrigin() = setOrigin(null)
 
     fun clearDestination() {
         _state.update {
@@ -272,7 +290,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         settings = _state.value.settings.toAvoidanceSettings(),
                     )
                     planner = builtPlanner
-                    builtPlanner.plan(from, to)
+                    builtPlanner.plan(from, to, originSnapMeters = originSnapMeters())
                 }
 
                 if (plan.isEmpty) {
@@ -319,9 +337,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(selectedRouteIndex = index.coerceIn(0, (it.routes.size - 1).coerceAtLeast(0))) }
     }
 
+    /**
+     * How far the router may look for a road under the start point.
+     *
+     * A pin the user placed themselves is exact, so it gets the default. A live fix is only
+     * as good as the device says it is, and indoors that is often hundreds of metres.
+     */
+    private fun originSnapMeters(): Double {
+        val current = _state.value
+        if (current.origin != null) return SnapRadius.DEFAULT_METERS
+        return SnapRadius.forAccuracy(current.userFix?.accuracyMeters)
+    }
+
     private fun describe(failure: RouteFailure?): String = when (failure) {
-        RouteFailure.ORIGIN_UNREACHABLE -> "No road found near your starting point."
-        RouteFailure.DESTINATION_UNREACHABLE -> "No road found near that destination."
+        RouteFailure.NO_MAP_DATA ->
+            "No road data downloaded for this area. Check your connection and try again."
+
+        // Say what to do about it. On its own this reads as a dead end, when in fact the
+        // driver can place the start themselves and carry on.
+        RouteFailure.ORIGIN_UNREACHABLE ->
+            "Couldn't find a road near your start. GPS is often poor indoors — long-press " +
+                "the map to set your starting point."
+
+        RouteFailure.DESTINATION_UNREACHABLE ->
+            "No road found near that destination. Try a point closer to a street."
+
         RouteFailure.SEARCH_EXHAUSTED -> "That trip is too complex to route on the phone."
         else -> "No route found between those two points."
     }
@@ -402,7 +442,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 val profile = _state.value.selectedRoute?.profile ?: return@launch
                 val plan = withContext(Dispatchers.Default) {
-                    activePlanner.plan(fix.position, destination, listOf(profile))
+                    activePlanner.plan(
+                        origin = fix.position,
+                        destination = destination,
+                        profiles = listOf(profile),
+                        originSnapMeters = SnapRadius.forAccuracy(fix.accuracyMeters),
+                    )
                 }
 
                 val route = plan.routes.firstOrNull() ?: return@launch
