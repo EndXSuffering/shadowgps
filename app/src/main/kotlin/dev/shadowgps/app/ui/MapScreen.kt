@@ -75,6 +75,7 @@ fun MapScreen(viewModel: MainViewModel) {
             userFix = state.userFix,
             origin = state.origin,
             destination = state.destination,
+            joinPoint = state.provisionalStart?.joinPoint,
             followUser = state.phase == Phase.NAVIGATING,
             showDetectorRanges = state.settings.showAllDetectors,
             recenterTick = state.recenterTick,
@@ -91,7 +92,16 @@ fun MapScreen(viewModel: MainViewModel) {
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .fillMaxWidth(),
         ) {
-            if (state.phase == Phase.NAVIGATING && state.navigation != null) {
+            if (state.awaitingJoin && state.provisionalStart != null) {
+                JoinPromptCard(
+                    provisional = state.provisionalStart!!,
+                    currentPosition = state.userFix?.position,
+                    units = state.settings.units,
+                    isRerouting = state.isRerouting,
+                    onCancel = viewModel::stopNavigation,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else if (state.phase == Phase.NAVIGATING && state.navigation != null) {
                 NavigationInstructionCard(
                     navigation = state.navigation!!,
                     units = state.settings.units,
@@ -190,6 +200,9 @@ fun MapScreen(viewModel: MainViewModel) {
             }
 
             when {
+                // The approach card at the top already says everything there is to say.
+                state.awaitingJoin -> Unit
+
                 state.phase == Phase.NAVIGATING && state.navigation != null && state.selectedRoute != null ->
                     NavigationFooter(
                         navigation = state.navigation!!,
@@ -204,6 +217,7 @@ fun MapScreen(viewModel: MainViewModel) {
                         routes = state.routes,
                         selectedIndex = state.selectedRouteIndex,
                         units = state.settings.units,
+                        provisionalStart = state.provisionalStart,
                         onSelect = viewModel::selectRoute,
                         onStart = viewModel::startNavigation,
                         onDismiss = viewModel::clearDestination,

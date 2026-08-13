@@ -113,10 +113,31 @@ data class Route(
     val shapeKey: Int get() = geometry.hashCode()
 }
 
+/**
+ * A route that begins somewhere other than where the driver is.
+ *
+ * Produced when nothing drivable is within reach of the start — an underground car park, a
+ * field, a campus, a ferry terminal. Rather than refusing to plan, the router falls back to
+ * the nearest point the road network actually reaches and says so, leaving the driver to
+ * cover the gap however they like.
+ */
+@Serializable
+data class ProvisionalStart(
+    /** Where the driver said they were. */
+    val requested: LatLon,
+    /** Where the route begins instead. */
+    val joinPoint: LatLon,
+    /** Straight-line gap between the two. */
+    val distanceMeters: Double,
+    val roadName: String? = null,
+)
+
 /** The outcome of planning a trip across several profiles. */
 data class RoutePlan(
     val routes: List<Route>,
     val failure: RouteFailure? = null,
+    /** Set when the routes start away from the requested origin; null when they start at it. */
+    val provisionalStart: ProvisionalStart? = null,
 ) {
     val isEmpty: Boolean get() = routes.isEmpty()
 

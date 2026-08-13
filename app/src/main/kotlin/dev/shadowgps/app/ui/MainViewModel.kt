@@ -21,11 +21,16 @@ import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.format.Formatting
 import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.geo.haversineMeters
+import dev.shadowgps.core.graph.RoadGraph
 import dev.shadowgps.core.nav.Announcement
 import dev.shadowgps.core.nav.NavigationConfig
 import dev.shadowgps.core.nav.NavigationEngine
 import dev.shadowgps.core.nav.NavigationState
 import dev.shadowgps.core.nav.PositionFix
+import dev.shadowgps.core.nav.StartJoinWatcher
+import dev.shadowgps.core.routing.PrivacyProfile
+import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteFailure
 import dev.shadowgps.core.routing.RoutePlanner
@@ -75,6 +80,10 @@ data class MainUiState(
     val suggestions: List<Place> = emptyList(),
     val searching: Boolean = false,
     val isRerouting: Boolean = false,
+    /** Set when the route starts away from the driver, because nothing drivable is nearer. */
+    val provisionalStart: ProvisionalStart? = null,
+    /** True while the driver makes their own way to that start and guidance waits. */
+    val awaitingJoin: Boolean = false,
     /** Bumped to ask the map to jump back to the driver's position. */
     val recenterTick: Int = 0,
 ) {
@@ -105,6 +114,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var planner: RoutePlanner? = null
     private var area: AreaData? = null
     private var engine: NavigationEngine? = null
+    private var joinWatcher: StartJoinWatcher? = null
 
     private var locationJob: Job? = null
     private var searchJob: Job? = null
@@ -143,9 +153,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun onFix(fix: PositionFix) {
         _state.update { it.copy(userFix = fix) }
+        if (_state.value.phase != Phase.NAVIGATING) return
+
+        // Still making our own way to a start the router could reach.
+        if (_state.value.awaitingJoin) {
+            handleApproach(fix)
+            return
+        }
 
         val engine = engine ?: return
-        if (_state.value.phase != Phase.NAVIGATING) return
 
         val navigation = engine.update(fix)
         _state.update { it.copy(navigation = navigation) }
@@ -254,12 +270,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun useCurrentLocationAsOrigin() = setOrigin(null)
 
     fun clearDestination() {
+        joinWatcher = null
         _state.update {
             it.copy(
                 destination = null,
                 routes = emptyList(),
                 navigation = null,
                 phase = Phase.BROWSING,
+                provisionalStart = null,
+                awaitingJoin = false,
             )
         }
     }
@@ -290,7 +309,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         settings = _state.value.settings.toAvoidanceSettings(),
                     )
                     planner = builtPlanner
-                    builtPlanner.plan(from, to, originSnapMeters = originSnapMeters())
+                    builtPlanner.plan(
+                        origin = from,
+                        destination = to,
+                        originSnapMeters = originSnapMeters(),
+                        // Rather than refusing when there is no road at the start, begin at
+                        // the nearest one there is and pick guidance up on arrival. Capped
+                        // to the downloaded padding, since roads beyond it are not loaded.
+                        fallbackStartMeters = MapDataRepository.DEFAULT_PADDING_METERS,
+                    )
                 }
 
                 if (plan.isEmpty) {
@@ -320,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         routes = plan.routes,
                         selectedRouteIndex = preferred,
                         detectors = loaded.detectors,
+                        provisionalStart = plan.provisionalStart,
                     )
                 }
             } catch (e: AreaTooLargeException) {
@@ -372,6 +400,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val route = _state.value.selectedRoute ?: return
         val settings = _state.value.settings
 
+        // The route starts somewhere the driver is not. Guiding from its first turn would
+        // be nonsense, so hold guidance until they reach a road and plan again from there.
+        val provisional = _state.value.provisionalStart
+        if (provisional != null) {
+            val graph = planner?.graph
+            if (graph != null) {
+                startApproach(route, provisional, graph)
+                return
+            }
+        }
+
         engine = NavigationEngine(
             route = route,
             config = NavigationConfig(
@@ -387,8 +426,116 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value.userFix?.let(::onFix)
     }
 
+    /**
+     * Waits for the driver to reach the road the route starts on.
+     *
+     * The route stays on screen so they can see where they are heading, but no turn-by-turn
+     * is spoken: until they are actually on the network, every instruction would be about a
+     * road they are not on.
+     */
+    private fun startApproach(route: Route, provisional: ProvisionalStart, graph: RoadGraph) {
+        engine = null
+        joinWatcher = StartJoinWatcher(graph)
+        _state.update {
+            it.copy(
+                phase = Phase.NAVIGATING,
+                awaitingJoin = true,
+                routes = listOf(route),
+                selectedRouteIndex = 0,
+                navigation = null,
+            )
+        }
+
+        NavigationHub.publish(
+            NavigationBanner(
+                instruction = "Head to ${provisional.roadName ?: "the nearest road"}",
+                detail = "Guidance starts once you reach it",
+            ),
+        )
+        NavigationService.start(getApplication())
+
+        if (_state.value.settings.speakDirections) {
+            speaker.speak(
+                "No road at your start. Head to ${provisional.roadName ?: "the nearest road"}, " +
+                    "and navigation will begin automatically.",
+            )
+        }
+
+        _state.value.userFix?.let(::onFix)
+    }
+
+    /** Keeps the driver posted while they cover the gap, and starts guidance when they arrive. */
+    private fun handleApproach(fix: PositionFix) {
+        val provisional = _state.value.provisionalStart
+        val units = _state.value.settings.units
+
+        if (provisional != null) {
+            val remaining = haversineMeters(fix.position, provisional.joinPoint)
+            NavigationHub.publish(
+                NavigationBanner(
+                    instruction = "Head to ${provisional.roadName ?: "the nearest road"}",
+                    detail = "${Formatting.distance(remaining, units)} away · guidance starts automatically",
+                ),
+            )
+        }
+
+        val joined = joinWatcher?.update(fix) ?: return
+        beginGuidanceFrom(joined)
+    }
+
+    /**
+     * Replans from where the driver actually ended up and hands over to turn-by-turn.
+     *
+     * Deliberately routes from the real position rather than the join point that was
+     * guessed earlier — leaving a car park by a different exit is normal, and the route
+     * should reflect the road they are really on.
+     */
+    private fun beginGuidanceFrom(position: LatLon) {
+        val destination = _state.value.destination?.position ?: return
+        val activePlanner = planner ?: return
+        val profile = _state.value.selectedRoute?.profile ?: PrivacyProfile.BALANCED
+        val settings = _state.value.settings
+
+        joinWatcher = null
+        viewModelScope.launch {
+            _state.update { it.copy(isRerouting = true) }
+            val plan = withContext(Dispatchers.Default) {
+                activePlanner.plan(position, destination, listOf(profile))
+            }
+
+            val route = plan.routes.firstOrNull()
+            if (route == null) {
+                // Snapped a moment ago but cannot route now; keep waiting rather than
+                // dropping the driver back to a blank map.
+                joinWatcher = StartJoinWatcher(activePlanner.graph)
+                _state.update { it.copy(isRerouting = false) }
+                return@launch
+            }
+
+            engine = NavigationEngine(
+                route = route,
+                config = NavigationConfig(
+                    units = settings.units,
+                    announceDetectors = settings.warnAboutCameras,
+                ),
+            )
+            _state.update {
+                it.copy(
+                    routes = listOf(route),
+                    selectedRouteIndex = 0,
+                    awaitingJoin = false,
+                    provisionalStart = null,
+                    isRerouting = false,
+                )
+            }
+            if (settings.speakDirections) speaker.speak("Starting navigation", urgent = true)
+            _state.value.userFix?.let(::onFix)
+        }
+    }
+
     fun stopNavigation() {
         engine = null
+        joinWatcher = null
         speaker.stop()
         NavigationService.stop(getApplication())
         _state.update {
@@ -396,6 +543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 phase = if (it.routes.isEmpty()) Phase.BROWSING else Phase.CHOOSING,
                 navigation = null,
                 isRerouting = false,
+                awaitingJoin = false,
             )
         }
     }
@@ -403,8 +551,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishNavigation() {
         NavigationService.stop(getApplication())
         engine = null
+        joinWatcher = null
         _state.update {
-            it.copy(phase = Phase.BROWSING, navigation = null, destination = null, routes = emptyList())
+            it.copy(
+                phase = Phase.BROWSING,
+                navigation = null,
+                destination = null,
+                routes = emptyList(),
+                provisionalStart = null,
+                awaitingJoin = false,
+            )
         }
     }
 

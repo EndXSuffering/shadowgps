@@ -5,6 +5,7 @@ import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.geo.concatCoords
 import dev.shadowgps.core.geo.coordsToList
+import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.geo.sliceCoords
 import dev.shadowgps.core.graph.RoadGraph
 
@@ -31,11 +32,50 @@ class RoutePlanner(
      * that triples the journey is not an option, it is a joke, and showing it would bury
      * the ones that are actually usable.
      */
+    /**
+     * @param fallbackStartMeters how far to look for a road when nothing is within
+     *   [originSnapMeters]. Non-zero turns an outright failure into a route that starts at
+     *   the nearest reachable road, flagged through [RoutePlan.provisionalStart]. Zero
+     *   keeps the strict behaviour.
+     */
     fun plan(
         origin: LatLon,
         destination: LatLon,
         profiles: List<PrivacyProfile> = PrivacyProfile.entries,
         originSnapMeters: Double = SnapRadius.DEFAULT_METERS,
+        fallbackStartMeters: Double = 0.0,
+    ): RoutePlan {
+        val direct = planFrom(origin, destination, profiles, originSnapMeters)
+
+        // Only a start that is genuinely off the network is worth relocating. Every other
+        // failure — no map, unreachable destination, no path — would be misrepresented by
+        // silently moving the driver somewhere else.
+        if (direct.failure != RouteFailure.ORIGIN_UNREACHABLE) return direct
+        if (fallbackStartMeters <= originSnapMeters) return direct
+
+        val nearest = graph.snapNearest(origin, fallbackStartMeters) ?: return direct
+        val fromNearest = planFrom(nearest.point, destination, profiles, SnapRadius.DEFAULT_METERS)
+        if (fromNearest.isEmpty) return direct
+
+        return fromNearest.copy(
+            provisionalStart = ProvisionalStart(
+                requested = origin,
+                joinPoint = nearest.point,
+                distanceMeters = haversineMeters(origin, nearest.point),
+                roadName = graph.edges[nearest.edgeIndex].displayName,
+            ),
+        )
+    }
+
+    /** Whether a trip could start from [point] without any help. */
+    fun isRoutableFrom(point: LatLon, snapMeters: Double = SnapRadius.DEFAULT_METERS): Boolean =
+        graph.snapNearest(point, snapMeters) != null
+
+    private fun planFrom(
+        origin: LatLon,
+        destination: LatLon,
+        profiles: List<PrivacyProfile>,
+        originSnapMeters: Double,
     ): RoutePlan {
         val routes = ArrayList<Route>(profiles.size)
         var firstFailure: RouteFailure? = null

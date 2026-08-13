@@ -56,6 +56,8 @@ fun MapCanvas(
     userFix: PositionFix?,
     origin: Place?,
     destination: Place?,
+    /** Where a detached route begins, when the driver is not on the network. */
+    joinPoint: LatLon?,
     followUser: Boolean,
     showDetectorRanges: Boolean,
     recenterTick: Int,
@@ -166,11 +168,17 @@ fun MapCanvas(
         mapView.invalidate()
     }
 
-    LaunchedEffect(origin, destination) {
+    LaunchedEffect(origin, destination, joinPoint) {
         pinLayer.items.clear()
         origin?.let {
             pinLayer.items.add(
                 pin(mapView, it.position, R.drawable.ic_marker_origin, it.shortName, centered = true),
+            )
+        }
+        // Where the driver has to get to before guidance can take over.
+        joinPoint?.let {
+            pinLayer.items.add(
+                pin(mapView, it, R.drawable.ic_marker_origin, "Route starts here", centered = true),
             )
         }
         destination?.let {

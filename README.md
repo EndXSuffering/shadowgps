@@ -51,6 +51,25 @@ Everything runs on the phone.
 4. **Guidance.** Turn-by-turn instructions, spoken directions, automatic rerouting after a
    wrong turn, and a spoken warning before each camera you are about to pass.
 
+### Starting from somewhere with no road
+
+Underground car parks, campuses, fields, ferry terminals — plenty of real starting points
+are nowhere near a mapped road, and a fix taken indoors can be hundreds of metres out.
+Rather than refusing to plan, the app:
+
+1. falls back to the **nearest road it can actually reach** and plans from there, telling
+   you how far away that is and which road it is;
+2. shows a compass heading and a live distance while you make your own way over — it does
+   not pretend to give turn-by-turn across a car park it knows nothing about;
+3. **starts guiding by itself** the moment your position is genuinely on the network,
+   replanning from wherever you actually emerged rather than from the point it guessed.
+
+"Genuinely on the network" means a trustworthy fix, not just a lucky one: a position
+claiming 400 m of error can land on a road by chance, and starting turn-by-turn on that
+basis would guide you down a street you are not on. So the fix has to be accurate (or
+moving fast enough that it could only be on a road) and hold up across consecutive
+readings.
+
 **No origin or destination ever leaves the device.** There is no routing server to send
 them to — that is the entire point. The only network calls are OpenStreetMap data for an
 area, map tiles, and address search if you use it.
@@ -110,8 +129,7 @@ as an artifact.
   that would need to swing wider than that will not be found.
 - **If your location fix is poor** — indoors, underground, or under tall buildings — the
   app widens its search for a road to match the accuracy the device reports, up to 2 km.
-  If that still fails, long-press the map and choose **Start** to place the start point
-  yourself.
+  You can also long-press the map and choose **Start** to place the start point yourself.
 
 ## Contributing camera data
 

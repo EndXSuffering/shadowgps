@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.NearMe
 import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.Search
@@ -58,8 +59,13 @@ import dev.shadowgps.app.ui.theme.ShadowColors
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.format.Formatting
 import dev.shadowgps.core.format.UnitSystem
+import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.geo.bearingDegrees
+import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.nav.NavigationState
+import dev.shadowgps.core.routing.Directions
 import dev.shadowgps.core.routing.PrivacyProfile
+import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 
 /** Destination entry: a text field that turns into a list of matches. */
@@ -174,6 +180,7 @@ fun RouteChooser(
     routes: List<Route>,
     selectedIndex: Int,
     units: UnitSystem,
+    provisionalStart: ProvisionalStart?,
     onSelect: (Int) -> Unit,
     onStart: () -> Unit,
     onDismiss: () -> Unit,
@@ -197,6 +204,11 @@ fun RouteChooser(
                 }
             }
             Spacer(Modifier.height(8.dp))
+
+            if (provisionalStart != null) {
+                DetachedStartNotice(provisionalStart, units)
+                Spacer(Modifier.height(12.dp))
+            }
 
             routes.forEachIndexed { index, route ->
                 RouteCard(
@@ -312,6 +324,123 @@ private fun exposureTone(count: Int): Color = when {
     count == 0 -> ShadowColors.Clear
     count <= 2 -> ShadowColors.Caution
     else -> ShadowColors.Watched
+}
+
+/** Explains, before the driver commits, that the route does not start where they are. */
+@Composable
+private fun DetachedStartNotice(provisional: ProvisionalStart, units: UnitSystem) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ShadowColors.Caution.copy(alpha = 0.12f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(14.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                Icons.Rounded.Explore,
+                contentDescription = null,
+                tint = ShadowColors.Caution,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(
+                    "No road where you are",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = ShadowColors.Caution,
+                )
+                Text(
+                    buildString {
+                        append("These routes start ")
+                        append(Formatting.distance(provisional.distanceMeters, units))
+                        append(" away")
+                        provisional.roadName?.let { append(" on $it") }
+                        append(". Make your own way there and guidance will begin by itself.")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Shown while the driver covers the gap to a start the router could reach.
+ *
+ * Deliberately not turn-by-turn: the app has no idea what is between them and the road, so
+ * it gives a direction and a distance and stays out of the way.
+ */
+@Composable
+fun JoinPromptCard(
+    provisional: ProvisionalStart,
+    currentPosition: LatLon?,
+    units: UnitSystem,
+    isRerouting: Boolean,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val remaining = currentPosition?.let { haversineMeters(it, provisional.joinPoint) }
+        ?: provisional.distanceMeters
+    val heading = currentPosition?.let { Directions.compass(bearingDegrees(it, provisional.joinPoint)) }
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 10.dp,
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Rounded.Explore,
+                    contentDescription = null,
+                    modifier = Modifier.size(34.dp),
+                    tint = ShadowColors.Caution,
+                )
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        Formatting.distance(remaining, units) + (heading?.let { " $it" } ?: ""),
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Text(
+                        "Head to ${provisional.roadName ?: "the nearest road"}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(10.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isRerouting) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "Picking up the route…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        "Waiting until you reach a road — guidance starts on its own.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
 }
 
 /** The big instruction banner shown while driving. */
