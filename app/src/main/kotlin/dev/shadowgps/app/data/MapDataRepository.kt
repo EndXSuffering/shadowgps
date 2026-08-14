@@ -57,28 +57,50 @@ class MapDataRepository(
         destination: LatLon,
         paddingMeters: Double = DEFAULT_PADDING_METERS,
         maxAreaKm2: Double = MAX_AREA_KM2,
+        onStage: (LoadStage) -> Unit = {},
     ): AreaData {
-        val box = BoundingBox.of(listOf(origin, destination)).expandMeters(paddingMeters)
+        val trip = BoundingBox.of(listOf(origin, destination))
+        val padded = trip.expandMeters(paddingMeters)
 
-        // A saved region is checked before the size guard: the limit exists because
+        // An area already in memory is reused when it holds enough map. A downloaded one
+        // has to cover the padded box, since that is all it ever fetched; a saved region
+        // only has to cover the trip, because the rest of the region is itself the padding.
+        cached?.let { area ->
+            val sufficient =
+                if (area.isOffline) area.bounds.contains(trip) else area.bounds.contains(padded)
+            if (sufficient) {
+                onStage(if (area.isOffline) LoadStage.OPENING_SAVED else LoadStage.READY)
+                return area
+            }
+        }
+
+        // Saved regions are checked before the size guard: the limit exists because
         // downloading and building a huge area on the phone is painful, and a region that
         // is already downloaded and already built is neither.
-        cached?.let { if (it.bounds.contains(box)) return it }
-        loadFromSavedRegion(box)?.let {
+        loadFromSavedRegion(trip = trip, preferred = padded, onStage = onStage)?.let {
             cached = it
             return it
         }
 
-        if (box.areaKm2 > maxAreaKm2) throw AreaTooLargeException(box.areaKm2, maxAreaKm2)
+        if (padded.areaKm2 > maxAreaKm2) throw AreaTooLargeException(padded.areaKm2, maxAreaKm2)
 
-        val area = load(box)
+        onStage(LoadStage.DOWNLOADING)
+        val area = load(padded)
         cached = area
         return area
     }
 
-    /** Uses a saved region when one covers [box], so the trip needs no network at all. */
-    private suspend fun loadFromSavedRegion(box: BoundingBox): AreaData? {
-        val region = regions.regionCovering(box) ?: return null
+    /** What [loadFor] is doing, so the screen can say something true about the wait. */
+    enum class LoadStage { OPENING_SAVED, DOWNLOADING, READY }
+
+    /** Uses a saved region when one covers the trip, so it needs no network at all. */
+    private suspend fun loadFromSavedRegion(
+        trip: BoundingBox,
+        preferred: BoundingBox,
+        onStage: (LoadStage) -> Unit,
+    ): AreaData? {
+        val region = regions.regionCovering(trip = trip, preferred = preferred) ?: return null
+        onStage(LoadStage.OPENING_SAVED)
         return runCatching {
             val payload = regions.load(region)
             AreaData(

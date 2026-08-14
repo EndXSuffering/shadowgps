@@ -326,9 +326,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (to == null) return
 
         viewModelScope.launch {
-            _state.update { it.copy(phase = Phase.WORKING, busyMessage = "Downloading map data…", error = null) }
+            // Deliberately neutral until the repository says which it is doing: claiming a
+            // download while opening a saved map is exactly the bug this replaced.
+            _state.update { it.copy(phase = Phase.WORKING, busyMessage = "Preparing the map…", error = null) }
             try {
-                val loaded = withContext(Dispatchers.IO) { repository.loadFor(from, to) }
+                val loaded = withContext(Dispatchers.IO) {
+                    repository.loadFor(from, to) { stage ->
+                        val message = when (stage) {
+                            MapDataRepository.LoadStage.OPENING_SAVED -> "Opening your saved map…"
+                            MapDataRepository.LoadStage.DOWNLOADING -> "Downloading map data…"
+                            MapDataRepository.LoadStage.READY -> null
+                        }
+                        _state.update { it.copy(busyMessage = message ?: it.busyMessage) }
+                    }
+                }
                 area = loaded
 
                 _state.update { it.copy(busyMessage = "Looking for a quiet way round…") }

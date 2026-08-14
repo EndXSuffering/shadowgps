@@ -4,6 +4,7 @@ import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.store.RegionFile
 import dev.shadowgps.core.store.RegionMetadata
 import dev.shadowgps.core.store.RegionPayload
+import dev.shadowgps.core.store.RegionSelection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -57,11 +58,20 @@ class RegionStore(root: File) {
         readIndex().regions.sortedByDescending { it.downloadedAtMillis }
     }
 
-    /** The smallest saved region that fully covers [box], or null if none does. */
-    suspend fun regionCovering(box: BoundingBox): SavedRegion? = withContext(Dispatchers.IO) {
-        readIndex().regions
-            .filter { it.bounds.contains(box) }
-            .minByOrNull { it.bounds.areaKm2 }
+    /**
+     * The best saved region to route a trip in, or null if none covers it.
+     *
+     * @param trip the area the trip spans; a region must contain this to qualify
+     * @param preferred the trip plus routing padding; only a tie-breaker. See
+     *   [RegionSelection] for why coverage must not be decided on the padded box.
+     */
+    suspend fun regionCovering(
+        trip: BoundingBox,
+        preferred: BoundingBox = trip,
+    ): SavedRegion? = withContext(Dispatchers.IO) {
+        val regions = readIndex().regions
+        val index = RegionSelection.chooseIndex(regions.map { it.bounds }, trip, preferred)
+        regions.getOrNull(index)
     }
 
     suspend fun load(region: SavedRegion): RegionPayload = withContext(Dispatchers.IO) {
