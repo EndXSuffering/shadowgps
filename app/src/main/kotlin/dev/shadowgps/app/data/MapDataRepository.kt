@@ -173,12 +173,33 @@ class MapDataRepository(
     /**
      * Just the surveillance layer for a box, without the road network.
      *
-     * Used to keep the map's camera markers populated as the user pans, which should not
-     * drag a multi-megabyte road download along with it.
+     * Keeps the map's camera markers populated as the user pans, without dragging a
+     * multi-megabyte road download along with it.
+     *
+     * Local sources come first and matter more than they look. Going to Overpass for every
+     * pan is why cameras used to trail the map by seconds, and it meant a saved region —
+     * which already contains every camera in it — still showed an empty map with no signal.
+     * Anything already in memory or on disk answers immediately and offline.
      */
-    suspend fun loadDetectors(box: BoundingBox): List<Detector> = withContext(Dispatchers.Default) {
-        val json = overpass.query(OverpassQueries.surveillance(box), DETECTOR_CACHE_MILLIS)
-        DetectorParser.parseAll(parseOverpassResponse(json).elements)
+    suspend fun loadDetectors(box: BoundingBox): List<Detector> {
+        detectorsFromMemory(box)?.let { return it }
+
+        loadFromSavedRegion(trip = box, preferred = box, onStage = {})?.let { area ->
+            // Holding the region also means the trip planned from here needs no download.
+            cached = area
+            return area.detectors.filter { box.contains(it.position) }
+        }
+
+        return withContext(Dispatchers.Default) {
+            val json = overpass.query(OverpassQueries.surveillance(box), DETECTOR_CACHE_MILLIS)
+            DetectorParser.parseAll(parseOverpassResponse(json).elements)
+        }
+    }
+
+    private fun detectorsFromMemory(box: BoundingBox): List<Detector>? {
+        val area = cached ?: return null
+        if (!area.bounds.contains(box)) return null
+        return area.detectors.filter { box.contains(it.position) }
     }
 
     fun cachedArea(): AreaData? = cached

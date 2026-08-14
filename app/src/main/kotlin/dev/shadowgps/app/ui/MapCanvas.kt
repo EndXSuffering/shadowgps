@@ -5,8 +5,11 @@ import android.graphics.drawable.Drawable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -16,6 +19,7 @@ import androidx.core.graphics.drawable.DrawableCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.delay
 import dev.shadowgps.app.R
 import dev.shadowgps.app.data.Place
 import dev.shadowgps.app.ui.theme.ShadowColors
@@ -73,7 +77,13 @@ fun MapCanvas(
     val detectorLayer = remember { FolderOverlay() }
     val pinLayer = remember { FolderOverlay() }
     val vehicleLayer = remember { FolderOverlay() }
-    val viewportGuard = remember { ViewportGuard(onViewportChanged) }
+
+    // Every map movement writes here; a debounce below decides when to act on it. A
+    // leading-edge throttle used to drop whatever arrived inside its window, which meant
+    // the end of a pan — the position the user actually stopped at — was routinely lost
+    // and its cameras never loaded.
+    val viewportRequest = remember { mutableStateOf<GeoBox?>(null) }
+    val reportViewport = rememberUpdatedState(onViewportChanged)
 
     val mapView = remember {
         MapView(context).apply {
@@ -107,17 +117,19 @@ fun MapCanvas(
             // The viewport is meaningless until the view has been measured, and nothing
             // else reports it until the user pans — which would leave "save this area"
             // with no area for as long as they leave the map alone.
-            addOnFirstLayoutListener { _, _, _, _, _ -> viewportGuard.onMoved(this@apply) }
+            addOnFirstLayoutListener { _, _, _, _, _ ->
+                viewportRequest.value = visibleBox(this@apply)
+            }
 
             addMapListener(
                 object : MapListener {
                     override fun onScroll(event: ScrollEvent?): Boolean {
-                        viewportGuard.onMoved(this@apply)
+                        viewportRequest.value = visibleBox(this@apply)
                         return false
                     }
 
                     override fun onZoom(event: ZoomEvent?): Boolean {
-                        viewportGuard.onMoved(this@apply)
+                        viewportRequest.value = visibleBox(this@apply)
                         return false
                     }
                 },
@@ -213,6 +225,10 @@ fun MapCanvas(
             centredOnUser.value = true
             mapView.controller.setZoom(16.0)
             mapView.controller.setCenter(GeoPoint(fix.position.lat, fix.position.lon))
+            // setCenter does not always emit a scroll event, and this is the jump that
+            // first brings the driver's own surroundings into view — the cameras that
+            // matter most. Report it directly rather than hoping for a callback.
+            viewportRequest.value = visibleBox(mapView)
         }
 
         vehicle.position = GeoPoint(fix.position.lat, fix.position.lon)
@@ -230,6 +246,18 @@ fun MapCanvas(
         mapView.invalidate()
     }
 
+    // Acts on where the map settled rather than where it passed through, and skips a
+    // reload when the new view is inside one already fetched — panning within an area
+    // whose cameras are on screen needs nothing.
+    var lastLoaded by remember { mutableStateOf<GeoBox?>(null) }
+    LaunchedEffect(viewportRequest.value) {
+        val box = viewportRequest.value ?: return@LaunchedEffect
+        delay(VIEWPORT_DEBOUNCE_MILLIS)
+        if (lastLoaded?.contains(box) == true) return@LaunchedEffect
+        lastLoaded = box
+        reportViewport.value(box)
+    }
+
     // Explicit "take me back to where I am", separate from follow mode so it also works
     // when the driver has panned away while browsing.
     LaunchedEffect(recenterTick) {
@@ -243,42 +271,20 @@ fun MapCanvas(
 }
 
 /**
- * Throttles map-movement callbacks.
+ * The area the map is currently showing, or null before it has been laid out.
  *
- * A scroll gesture fires these continuously, and each one could trigger a download of the
- * surveillance layer.
+ * osmdroid can report a degenerate box at extreme zoom or mid-animation, which [GeoBox]
+ * rejects; that is a frame to skip, not a crash.
  */
-private class ViewportGuard(private val onChanged: (GeoBox) -> Unit) {
-    private var lastNotifiedAt = 0L
-    private var lastCenter: GeoPoint? = null
-
-    fun onMoved(map: MapView) {
-        val now = System.currentTimeMillis()
-        if (now - lastNotifiedAt < THROTTLE_MILLIS) return
-
-        val center = map.mapCenter as? GeoPoint ?: GeoPoint(map.mapCenter.latitude, map.mapCenter.longitude)
-        val previous = lastCenter
-        if (previous != null && previous.distanceToAsDouble(center) < MIN_MOVE_METERS) return
-
-        lastNotifiedAt = now
-        lastCenter = center
-
-        val box = map.boundingBox ?: return
-        onChanged(
-            GeoBox(
-                south = box.latSouth,
-                west = box.lonWest,
-                north = box.latNorth,
-                east = box.lonEast,
-            ),
-        )
-    }
-
-    private companion object {
-        const val THROTTLE_MILLIS = 1_500L
-        const val MIN_MOVE_METERS = 400.0
-    }
+private fun visibleBox(map: MapView): GeoBox? {
+    val box = map.boundingBox ?: return null
+    return runCatching {
+        GeoBox(south = box.latSouth, west = box.lonWest, north = box.latNorth, east = box.lonEast)
+    }.getOrNull()
 }
+
+/** Settling time after the last map movement before the camera layer is fetched. */
+private const val VIEWPORT_DEBOUNCE_MILLIS = 400L
 
 private const val ROUTE_PADDING_PX = 140
 

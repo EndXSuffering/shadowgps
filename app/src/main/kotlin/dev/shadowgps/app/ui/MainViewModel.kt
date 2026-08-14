@@ -381,13 +381,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ?.takeIf { it >= 0 }
                     ?: 0
 
+                // A saved region can hold thousands of devices, and each one drawn is a
+                // marker plus a coverage shape. Only those near the routes are worth
+                // showing, and the route's own camera count comes from its exposure
+                // report rather than from this list, so trimming it changes no numbers.
+                val nearby = detectorsNear(plan.routes, loaded.detectors)
+
                 _state.update {
                     it.copy(
                         phase = Phase.CHOOSING,
                         busyMessage = null,
                         routes = plan.routes,
                         selectedRouteIndex = preferred,
-                        detectors = loaded.detectors,
+                        detectors = nearby,
                         provisionalStart = plan.provisionalStart,
                         routedOffline = loaded.isOffline,
                     )
@@ -401,6 +407,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fail("Ran out of memory building the map for that area. Try a shorter journey.")
             }
         }
+    }
+
+    /** Devices worth drawing for a set of routes: those within sight of any of them. */
+    private fun detectorsNear(routes: List<Route>, detectors: List<Detector>): List<Detector> {
+        val points = routes.flatMap { it.geometry }
+        if (points.isEmpty()) return detectors
+        val area = BoundingBox.of(points).expandMeters(DETECTOR_KEEP_MARGIN_METERS)
+        return detectors.filter { area.contains(it.position) }
     }
 
     fun selectRoute(index: Int) {
@@ -676,7 +690,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { repository.loadDetectors(box) }
                 .onSuccess { found ->
                     _state.update { current ->
-                        val merged = (current.detectors + found).distinctBy { it.id }
+                        // Every drawn detector is a marker plus a coverage shape, so the
+                        // set has to stay bounded — accumulating everything ever seen made
+                        // panning slower the longer the app had been open.
+                        val keep = box.expandMeters(DETECTOR_KEEP_MARGIN_METERS)
+                        val merged = (current.detectors + found)
+                            .distinctBy { it.id }
+                            .filter { keep.contains(it.position) }
                         current.copy(detectors = merged)
                     }
                 }
@@ -806,5 +826,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val SEARCH_DEBOUNCE_MILLIS = 350L
         const val REROUTE_COOLDOWN_MILLIS = 12_000L
         const val DETECTOR_LAYER_MAX_KM2 = 900.0
+
+        /** How far outside the view to keep drawn cameras, so a small pan shows no gap. */
+        const val DETECTOR_KEEP_MARGIN_METERS = 3_000.0
     }
 }
