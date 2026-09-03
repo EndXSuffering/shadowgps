@@ -323,4 +323,40 @@ class NavigationEngineTest {
         assertEquals(0, state.currentStepIndex)
         assertTrue(state.detectorsAhead.isEmpty())
     }
+
+    @Test
+    fun `the manoeuvre after next is reported for a preview`() {
+        // Turns arriving in quick succession are exactly when a driver needs warning of
+        // the second one, so they take the first in the right lane.
+        val planner = RoutePlanner(grid, emptyList())
+        val route = planner.plan(
+            Fixtures.position(0, 0),
+            Fixtures.position(2, 2),
+            listOf(PrivacyProfile.FASTEST),
+        ).routes.single()
+
+        val states = drive(NavigationEngine(route), route)
+
+        val withPreview = states.filter { it.followingStep != null }
+        assertTrue(withPreview.isNotEmpty(), "a route with two manoeuvres should preview the second")
+
+        val sample = withPreview.first()
+        assertTrue(sample.metersBetweenManeuvers >= 0.0)
+        // The preview really is the step after the one being announced.
+        assertEquals(
+            route.steps.indexOf(sample.nextStep) + 1,
+            route.steps.indexOf(sample.followingStep),
+        )
+    }
+
+    @Test
+    fun `there is nothing to preview on a straight run`() {
+        val route = straightRoute()
+        val state = NavigationEngine(route).update(
+            PositionFix(route.geometry.first(), accuracyMeters = 5.0, speedMetersPerSecond = 10.0),
+        )
+
+        // Depart then arrive: the only thing after the next step is the end of the trip.
+        assertEquals(null, state.followingStep)
+    }
 }

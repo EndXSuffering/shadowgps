@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.NearMe
@@ -33,8 +34,16 @@ import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.RoundaboutLeft
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarBorder
+import androidx.compose.material.icons.rounded.TurnLeft
+import androidx.compose.material.icons.rounded.TurnRight
+import androidx.compose.material.icons.rounded.TurnSharpLeft
+import androidx.compose.material.icons.rounded.TurnSharpRight
+import androidx.compose.material.icons.rounded.TurnSlightLeft
+import androidx.compose.material.icons.rounded.TurnSlightRight
+import androidx.compose.material.icons.rounded.UTurnLeft
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -76,6 +85,7 @@ import dev.shadowgps.core.geo.bearingDegrees
 import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.nav.NavigationState
 import dev.shadowgps.core.routing.Directions
+import dev.shadowgps.core.routing.Maneuver
 import dev.shadowgps.core.routing.PrivacyProfile
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
@@ -593,9 +603,12 @@ fun NavigationInstructionCard(
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Rounded.ArrowUpward,
+                    // The shape of the turn itself, not a generic arrow: seen from the
+                    // corner of the eye at speed, the icon registers well before the words
+                    // do, and it is on screen for the whole approach to the junction.
+                    maneuverIcon(next?.maneuver),
                     contentDescription = null,
-                    modifier = Modifier.size(34.dp),
+                    modifier = Modifier.size(38.dp),
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.width(14.dp))
@@ -609,6 +622,38 @@ fun NavigationInstructionCard(
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            // Turns often come in pairs. Knowing the second one is coming is what lets a
+            // driver take the first in the right lane.
+            val following = navigation.followingStep
+            if (following != null &&
+                following.maneuver != Maneuver.ARRIVE &&
+                navigation.metersBetweenManeuvers <= THEN_PREVIEW_METERS
+            ) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "then",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        maneuverIcon(following.maneuver),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        following.instruction,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -651,6 +696,24 @@ fun NavigationInstructionCard(
         }
     }
 }
+
+/** How close the second manoeuvre has to be before it is worth previewing. */
+private const val THEN_PREVIEW_METERS = 400.0
+
+/** The icon for a manoeuvre, so the turn is legible at a glance. */
+private fun maneuverIcon(maneuver: Maneuver?): androidx.compose.ui.graphics.vector.ImageVector =
+    when (maneuver) {
+        Maneuver.LEFT -> Icons.Rounded.TurnLeft
+        Maneuver.RIGHT -> Icons.Rounded.TurnRight
+        Maneuver.SLIGHT_LEFT -> Icons.Rounded.TurnSlightLeft
+        Maneuver.SLIGHT_RIGHT -> Icons.Rounded.TurnSlightRight
+        Maneuver.SHARP_LEFT -> Icons.Rounded.TurnSharpLeft
+        Maneuver.SHARP_RIGHT -> Icons.Rounded.TurnSharpRight
+        Maneuver.U_TURN -> Icons.Rounded.UTurnLeft
+        Maneuver.ROUNDABOUT -> Icons.Rounded.RoundaboutLeft
+        Maneuver.ARRIVE -> Icons.Rounded.Flag
+        else -> Icons.Rounded.ArrowUpward
+    }
 
 /** Trip summary and the stop button, pinned to the bottom while driving. */
 @Composable

@@ -88,6 +88,16 @@ data class NavigationState(
     val currentStep: RouteStep?,
     val nextStep: RouteStep?,
     val distanceToManeuverMeters: Double,
+    /**
+     * The manoeuvre after the next one.
+     *
+     * Turns often arrive in pairs — off one road and straight onto another — and knowing
+     * the second one is coming is the difference between taking the first calmly and
+     * taking it in the wrong lane.
+     */
+    val followingStep: RouteStep? = null,
+    /** How far past the next manoeuvre [followingStep] is. */
+    val metersBetweenManeuvers: Double = 0.0,
     val deviationMeters: Double,
     val isOffRoute: Boolean,
     val hasArrived: Boolean,
@@ -147,6 +157,11 @@ class NavigationEngine(
         val maneuverAt = nextStep?.startAlongRouteMeters ?: totalLength
         val toManeuver = (maneuverAt - progressMeters).coerceAtLeast(0.0)
 
+        val followingStep = route.steps.getOrNull(stepIndex + 2)
+        val betweenManeuvers = followingStep
+            ?.let { (it.startAlongRouteMeters - maneuverAt).coerceAtLeast(0.0) }
+            ?: 0.0
+
         val justArrived = remaining <= config.arrivalMeters
         if (justArrived) arrived = true
 
@@ -180,6 +195,8 @@ class NavigationEngine(
             currentStep = currentStep,
             nextStep = nextStep,
             distanceToManeuverMeters = toManeuver,
+            followingStep = followingStep,
+            metersBetweenManeuvers = betweenManeuvers,
             deviationMeters = deviation,
             isOffRoute = offRoute,
             hasArrived = arrived,

@@ -281,11 +281,8 @@ object Directions {
         }
 
         val leadEdge = graph.edges[edgeIndices[from]]
-        val roadName = roadNameOverride ?: (from until toExclusive)
-            .asSequence()
-            .map { graph.edges[edgeIndices[it]] }
-            .mapNotNull { it.displayName }
-            .firstOrNull()
+        val roadName = roadNameOverride
+            ?: pickRoadName(graph, edgeIndices, from, toExclusive, edgeDistances, distance)
 
         return RouteStep(
             maneuver = maneuver,
@@ -298,6 +295,51 @@ object Directions {
             roundaboutExit = roundaboutExit,
         )
     }
+
+    /**
+     * Which road an instruction should name.
+     *
+     * A step can span several named roads, so simply taking the first name that appears
+     * anywhere in it can announce a street well past the junction — "turn left onto Oak
+     * Avenue" when Oak Avenue is the road after the unnamed one being turned onto. Two
+     * candidates matter and they are not always the same: the road at the junction, which
+     * is what the sign says and what the driver is looking for, and the road the step is
+     * mostly spent on, which is what they will be driving along.
+     *
+     * The junction wins, because that is the decision being described — unless it is a
+     * brief stub of a slip road or a close, in which case naming it would send the driver
+     * hunting for a sign that is barely there, and the road it leads onto is the useful
+     * answer.
+     */
+    private fun pickRoadName(
+        graph: RoadGraph,
+        edgeIndices: IntArray,
+        from: Int,
+        toExclusive: Int,
+        edgeDistances: DoubleArray,
+        stepDistance: Double,
+    ): String? {
+        val distanceByName = LinkedHashMap<String, Double>()
+        for (i in from until toExclusive) {
+            val name = graph.edges[edgeIndices[i]].displayName ?: continue
+            distanceByName[name] = (distanceByName[name] ?: 0.0) + edgeDistances[i]
+        }
+        if (distanceByName.isEmpty()) return null
+
+        val dominant = distanceByName.maxByOrNull { it.value }?.key
+        val atJunction = graph.edges[edgeIndices[from]].displayName ?: return dominant
+
+        val share = distanceByName[atJunction] ?: 0.0
+        val worthNaming = share >= MINIMUM_NAMED_STRETCH_METERS ||
+            (stepDistance > 0 && share / stepDistance >= MINIMUM_NAMED_SHARE)
+        return if (worthNaming) atJunction else dominant
+    }
+
+    /** A named stretch shorter than this is a stub, not the road the driver wants told. */
+    private const val MINIMUM_NAMED_STRETCH_METERS = 40.0
+
+    /** …or it can earn its place by being most of the step regardless. */
+    private const val MINIMUM_NAMED_SHARE = 0.25
 
     fun classify(turnDegrees: Double, isUTurn: Boolean): Maneuver {
         if (isUTurn) return Maneuver.U_TURN

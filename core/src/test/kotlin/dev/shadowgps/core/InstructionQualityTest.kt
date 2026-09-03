@@ -209,4 +209,64 @@ class InstructionQualityTest {
             steps.joinToString { it.instruction },
         )
     }
+
+    @Test
+    fun `a turn names the road at the junction`() {
+        val origin = LatLon(35.99, -78.90)
+        val corner = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val north = destinationPoint(corner, bearing = 0.0, meters = 400.0)
+
+        val town = Town()
+            .road(listOf(origin, corner), "Approach Road")
+            .road(listOf(corner, north), "Oak Avenue")
+            .road(listOf(corner, destinationPoint(corner, bearing = 90.0, meters = 200.0)), "East Road")
+
+        val steps = instructionsFor(town, origin, north)
+        val turn = steps.first { it.maneuver == Maneuver.LEFT }
+
+        assertEquals("Oak Avenue", turn.roadName)
+        assertTrue(turn.instruction.contains("onto Oak Avenue"), turn.instruction)
+    }
+
+    @Test
+    fun `a turn onto a short unnamed link names the road it leads to`() {
+        // Turning onto a stub with no name, which immediately becomes the real street.
+        // Naming nothing is unhelpful, and the road the driver ends up on is the answer.
+        val origin = LatLon(35.99, -78.90)
+        val corner = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val linkEnd = destinationPoint(corner, bearing = 0.0, meters = 25.0)
+        val north = destinationPoint(linkEnd, bearing = 0.0, meters = 500.0)
+
+        val town = Town()
+            .road(listOf(origin, corner), "Approach Road")
+            .road(listOf(corner, linkEnd), null)
+            .road(listOf(linkEnd, north), "Oak Avenue")
+            .road(listOf(corner, destinationPoint(corner, bearing = 90.0, meters = 200.0)), "East Road")
+
+        val steps = instructionsFor(town, origin, north)
+        val turn = steps.first { it.maneuver == Maneuver.LEFT }
+
+        assertEquals("Oak Avenue", turn.roadName, steps.joinToString { it.instruction })
+    }
+
+    @Test
+    fun `a step is not named after a road far past the turn`() {
+        // The bug this pins: taking the first name found anywhere in a step could reach
+        // past a long named stretch and announce the street after it.
+        val origin = LatLon(35.99, -78.90)
+        val corner = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val midway = destinationPoint(corner, bearing = 0.0, meters = 600.0)
+        val far = destinationPoint(midway, bearing = 0.0, meters = 100.0)
+
+        val town = Town()
+            .road(listOf(origin, corner), "Approach Road")
+            .road(listOf(corner, midway), "Oak Avenue")
+            .road(listOf(midway, far), "Distant Close")
+            .road(listOf(corner, destinationPoint(corner, bearing = 90.0, meters = 200.0)), "East Road")
+
+        val steps = instructionsFor(town, origin, far)
+        val turn = steps.first { it.maneuver == Maneuver.LEFT }
+
+        assertEquals("Oak Avenue", turn.roadName, steps.joinToString { it.instruction })
+    }
 }
