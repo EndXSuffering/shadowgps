@@ -8,6 +8,8 @@ import dev.shadowgps.core.geo.coordsToList
 import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.geo.sliceCoords
 import dev.shadowgps.core.graph.RoadGraph
+import dev.shadowgps.core.traffic.TrafficModel
+import dev.shadowgps.core.traffic.TrafficTable
 
 /**
  * Plans a trip several ways at once and reports what each one costs in time and exposure.
@@ -20,9 +22,12 @@ class RoutePlanner(
     val detectors: List<Detector>,
     settings: AvoidanceSettings = AvoidanceSettings.DEFAULT,
     private val options: RoutingOptions = RoutingOptions(),
+    /** Typical congestion for the departure time; free-flow ignores traffic entirely. */
+    val traffic: TrafficModel = TrafficModel.FREE_FLOW,
 ) {
     val exposureIndex: ExposureIndex = ExposureIndex(graph, detectors, ExposureModel(settings))
-    private val router = Router(graph, exposureIndex, options)
+    private val trafficTable = TrafficTable(graph, traffic)
+    private val router = Router(graph, exposureIndex, options, trafficTable)
 
     /**
      * Routes [origin] to [destination] once per profile.
@@ -105,7 +110,11 @@ class RoutePlanner(
             }
         }
 
-        return RoutePlan(routes = routes, failure = if (routes.isEmpty()) firstFailure ?: RouteFailure.NO_PATH else null)
+        return RoutePlan(
+            routes = routes,
+            failure = if (routes.isEmpty()) firstFailure ?: RouteFailure.NO_PATH else null,
+            traffic = traffic,
+        )
     }
 
     /** Expands a raw edge chain into geometry, timings, instructions and an exposure report. */
@@ -116,6 +125,7 @@ class RoutePlanner(
         val pieces = ArrayList<DoubleArray>(count)
         val distances = DoubleArray(count)
         val durations = DoubleArray(count)
+        val freeFlowDurations = DoubleArray(count)
         val startOffsets = DoubleArray(count)
 
         val encountersByDetector = LinkedHashMap<String, DetectorEncounter>()
@@ -136,12 +146,16 @@ class RoutePlanner(
 
             // Junction and turn delays are real time the driver spends, so they belong in
             // the duration even though they are not part of any single edge.
-            var seconds = edge.travelSeconds * fraction
+            val turn = if (position > 0) turnSeconds(edgeIndices[position - 1], edgeIndex) else 0.0
+
+            var seconds = trafficTable.edgeSeconds[edgeIndex] * fraction
+            var freeFlow = edge.travelSeconds * fraction
             if (position > 0) {
-                seconds += graph.nodeDelaySeconds[edge.fromNode]
-                seconds += turnSeconds(edgeIndices[position - 1], edgeIndex)
+                seconds += trafficTable.nodeSeconds[edge.fromNode] + turn
+                freeFlow += graph.nodeDelaySeconds[edge.fromNode] + turn
             }
             durations[position] = seconds
+            freeFlowDurations[position] = freeFlow
 
             for (hit in exposureIndex.hits(edgeIndex)) {
                 if (hit.alongMeters < from || hit.alongMeters > to) continue
@@ -186,6 +200,7 @@ class RoutePlanner(
             durationSeconds = durations.sum(),
             steps = withDetectorCounts(steps, encounters),
             exposure = exposure,
+            freeFlowSeconds = freeFlowDurations.sum(),
         )
     }
 

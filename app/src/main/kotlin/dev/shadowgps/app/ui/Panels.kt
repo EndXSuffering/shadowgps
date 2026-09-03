@@ -79,6 +79,7 @@ import dev.shadowgps.core.routing.Directions
 import dev.shadowgps.core.routing.PrivacyProfile
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
+import dev.shadowgps.core.traffic.TrafficModel
 
 /** Destination entry: a text field that turns into a list of matches. */
 @Composable
@@ -275,12 +276,14 @@ fun RouteChooser(
     units: UnitSystem,
     provisionalStart: ProvisionalStart?,
     offline: Boolean,
+    traffic: TrafficModel,
     onSelect: (Int) -> Unit,
     onStart: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val baseline = routes.minOfOrNull { it.durationSeconds } ?: 0.0
+    val quickest = routes.minByOrNull { it.durationSeconds }
 
     Surface(
         modifier = modifier,
@@ -298,6 +301,14 @@ fun RouteChooser(
                         "· from a saved map",
                         style = MaterialTheme.typography.labelMedium,
                         color = ShadowColors.Clear,
+                    )
+                }
+                if (traffic.isSignificant) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "· ${traffic.label.lowercase()}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Caution,
                     )
                 }
                 Spacer(Modifier.weight(1f))
@@ -318,6 +329,7 @@ fun RouteChooser(
                     selected = index == selectedIndex,
                     baselineSeconds = baseline,
                     units = units,
+                    quickestNow = routes.size > 1 && route === quickest,
                     onClick = { onSelect(index) },
                 )
                 Spacer(Modifier.height(8.dp))
@@ -342,6 +354,7 @@ private fun RouteCard(
     selected: Boolean,
     baselineSeconds: Double,
     units: UnitSystem,
+    quickestNow: Boolean,
     onClick: () -> Unit,
 ) {
     val watched = route.exposure.totalCount
@@ -384,6 +397,21 @@ private fun RouteCard(
                         Formatting.durationDelta(delta) + " slower",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (route.trafficDelaySeconds > 60) {
+                    Text(
+                        "${Formatting.durationDelta(route.trafficDelaySeconds)} for traffic",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Caution,
+                    )
+                }
+                // The happy case worth calling out: quickest right now *and* unseen.
+                if (quickestNow) {
+                    Text(
+                        if (watched == 0) "Quickest right now, and unseen" else "Quickest right now",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Clear,
                     )
                 }
             }
@@ -779,6 +807,13 @@ fun SettingsSheet(
                 subtitle = "Stay awake while navigating.",
                 checked = settings.keepScreenOnWhileNavigating,
                 onCheckedChange = { on -> onUpdate { it.copy(keepScreenOnWhileNavigating = on) } },
+            )
+            SettingRow(
+                title = "Allow for typical traffic",
+                subtitle = "Adjust times for the usual congestion at this hour. A model of " +
+                    "typical conditions — not a live feed, and it cannot know about a jam.",
+                checked = settings.allowForTraffic,
+                onCheckedChange = { on -> onUpdate { it.copy(allowForTraffic = on) } },
             )
             SettingRow(
                 title = "Show coverage on the map",

@@ -39,6 +39,8 @@ import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteFailure
 import dev.shadowgps.core.routing.RoutePlanner
 import dev.shadowgps.core.routing.SnapRadius
+import dev.shadowgps.core.traffic.TrafficModel
+import java.time.LocalDateTime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -117,6 +119,8 @@ data class MainUiState(
     val overview: Boolean = false,
     val savedPlaces: List<SavedPlace> = emptyList(),
     val recentPlaces: List<SavedPlace> = emptyList(),
+    /** Conditions the routes on screen were planned under. */
+    val traffic: TrafficModel = TrafficModel.FREE_FLOW,
 ) {
     val selectedRoute: Route? get() = routes.getOrNull(selectedRouteIndex)
 
@@ -362,6 +366,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         graph = loaded.graph,
                         detectors = loaded.detectors,
                         settings = _state.value.settings.toAvoidanceSettings(),
+                        traffic = currentTraffic(),
                     )
                     planner = builtPlanner
                     builtPlanner.plan(
@@ -410,6 +415,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         detectors = nearby,
                         provisionalStart = plan.provisionalStart,
                         routedOffline = loaded.isOffline,
+                        traffic = plan.traffic,
                     )
                 }
             } catch (e: AreaTooLargeException) {
@@ -446,6 +452,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (current.origin != null) return SnapRadius.DEFAULT_METERS
         return SnapRadius.forAccuracy(current.userFix?.accuracyMeters)
     }
+
+    /**
+     * Congestion expected at this moment.
+     *
+     * Read at planning time rather than held, so a trip planned at ten to five and one
+     * planned at ten past get the conditions each actually faces.
+     */
+    private fun currentTraffic(): TrafficModel =
+        if (_state.value.settings.allowForTraffic) {
+            TrafficModel.at(LocalDateTime.now())
+        } else {
+            TrafficModel.FREE_FLOW
+        }
 
     private fun describe(failure: RouteFailure?): String = when (failure) {
         RouteFailure.NO_MAP_DATA ->
@@ -679,6 +698,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         graph = reloaded.graph,
                         detectors = reloaded.detectors,
                         settings = _state.value.settings.toAvoidanceSettings(),
+                        traffic = currentTraffic(),
                     ).also { planner = it }
                 } ?: return@launch
 

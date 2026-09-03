@@ -5,6 +5,7 @@ import dev.shadowgps.core.geo.angularDifference
 import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.graph.RoadGraph
 import dev.shadowgps.core.graph.Speeds
+import dev.shadowgps.core.traffic.TrafficTable
 import kotlin.math.abs
 
 /** Knobs that shape the search itself, independent of how much privacy is being bought. */
@@ -89,6 +90,14 @@ class Router(
     private val graph: RoadGraph,
     private val exposure: ExposureIndex,
     private val options: RoutingOptions = RoutingOptions(),
+    /**
+     * Typical congestion for the departure time, or free-flow.
+     *
+     * Applied as slower edges rather than as a post-hoc adjustment, so the search actually
+     * prefers roads that hold up at this hour instead of merely reporting a worse time for
+     * the same route.
+     */
+    private val traffic: TrafficTable = TrafficTable.freeFlow(graph),
 ) {
 
     private val maxSpeedMetersPerSecond = Speeds.MAX_PLAUSIBLE_KPH / 3.6
@@ -197,7 +206,7 @@ class Router(
             }
 
             val junction = edge.toNode
-            val junctionDelay = graph.nodeDelaySeconds[junction]
+            val junctionDelay = traffic.nodeSeconds[junction]
 
             graph.forEachOutgoing(junction) { nextIndex ->
                 val next = graph.edges[nextIndex]
@@ -266,10 +275,8 @@ class Router(
     }
 
     /** Cost of traversing a whole edge. */
-    private fun fullCost(edgeIndex: Int, lambdaSeconds: Double): Double {
-        val edge = graph.edges[edgeIndex]
-        return edge.travelSeconds + lambdaSeconds * exposure.edgeWeight[edgeIndex]
-    }
+    private fun fullCost(edgeIndex: Int, lambdaSeconds: Double): Double =
+        traffic.edgeSeconds[edgeIndex] + lambdaSeconds * exposure.edgeWeight[edgeIndex]
 
     /**
      * Cost of traversing part of an edge.
@@ -282,7 +289,7 @@ class Router(
         val edge = graph.edges[edgeIndex]
         val span = (toMeters - fromMeters).coerceAtLeast(0.0)
         val fraction = if (edge.lengthMeters <= 0.0) 0.0 else (span / edge.lengthMeters).coerceIn(0.0, 1.0)
-        val seconds = edge.travelSeconds * fraction
+        val seconds = traffic.edgeSeconds[edgeIndex] * fraction
 
         if (lambdaSeconds <= 0.0) return seconds
 

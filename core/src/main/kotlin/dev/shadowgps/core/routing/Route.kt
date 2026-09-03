@@ -3,6 +3,7 @@ package dev.shadowgps.core.routing
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.traffic.TrafficModel
 import kotlinx.serialization.Serializable
 
 /** How hard the router should work to stay out of sight. */
@@ -108,7 +109,18 @@ data class Route(
     val durationSeconds: Double,
     val steps: List<RouteStep>,
     val exposure: RouteExposure,
+    /**
+     * What the trip would take on empty roads.
+     *
+     * Kept beside [durationSeconds] so the driver can see how much of the estimate is the
+     * traffic model's doing and judge it for themselves — a modelled delay presented
+     * without that comparison is just an unexplained number.
+     */
+    val freeFlowSeconds: Double = durationSeconds,
 ) {
+    /** Time the congestion model expects this route to lose. */
+    val trafficDelaySeconds: Double get() = (durationSeconds - freeFlowSeconds).coerceAtLeast(0.0)
+
     /** Stable identity for a route's shape, used to spot duplicates across profiles. */
     val shapeKey: Int get() = geometry.hashCode()
 }
@@ -138,7 +150,12 @@ data class RoutePlan(
     val failure: RouteFailure? = null,
     /** Set when the routes start away from the requested origin; null when they start at it. */
     val provisionalStart: ProvisionalStart? = null,
+    /** Conditions these routes were planned under. */
+    val traffic: TrafficModel = TrafficModel.FREE_FLOW,
 ) {
+    /** Quickest under the conditions actually modelled, which is what the driver cares about. */
+    val quickest: Route? get() = routes.minByOrNull { it.durationSeconds }
+
     val isEmpty: Boolean get() = routes.isEmpty()
 
     /** The zero-penalty route, when it was requested — the yardstick for everything else. */

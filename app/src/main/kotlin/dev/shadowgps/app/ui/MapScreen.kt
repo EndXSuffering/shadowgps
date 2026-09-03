@@ -230,6 +230,7 @@ fun MapScreen(viewModel: MainViewModel) {
                         units = state.settings.units,
                         provisionalStart = state.provisionalStart,
                         offline = state.routedOffline,
+                        traffic = state.traffic,
                         onSelect = viewModel::selectRoute,
                         onStart = viewModel::startNavigation,
                         onDismiss = viewModel::clearDestination,

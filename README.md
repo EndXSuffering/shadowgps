@@ -128,6 +128,35 @@ way with `-Pshadowgps.android=true|false`.
 CI builds the APK and runs the tests on every push; the debug APK is attached to each run
 as an artifact.
 
+### Traffic, without a traffic feed
+
+There is no open source of real-time traffic. Every provider — Google, TomTom, HERE,
+INRIX — is commercial, and they all work the same way: by continuously collecting where
+their users are. Wiring one in would mean paying for a key *and* streaming your position
+and route to a company whose business is aggregating exactly that, which is the thing this
+app exists to avoid.
+
+So it does the part that can be had honestly. **Settings → Allow for typical traffic**
+applies a local model of how congested roads usually are at this hour, on this kind of day:
+
+- a **weekday** has the familiar twin commuter peaks and a midday lull that never quite
+  returns to the overnight floor; Saturday is one broad afternoon hump; Sunday is lower;
+- **road classes suffer differently** — a motorway can lose half its speed at peak while a
+  residential street barely notices, because what saturates is the routes everyone shares;
+- **junction delay grows faster than link speed falls**, which is why a route with six sets
+  of lights loses to a longer one with none long before the roads themselves fill up.
+
+That last point is what makes it useful rather than cosmetic: it can genuinely change which
+route wins, and the back streets it favours at rush hour are often the ones without plate
+readers on them. Routes show both the time now and how much of that is the model's doing,
+and the quickest option under current conditions is marked — including when it is also the
+unseen one.
+
+**It is a prior, not a report.** It knows a motorway at half five on a Tuesday is usually
+slow. It knows nothing about the lorry that jackknifed twenty minutes ago. Times are
+computed for your departure time and not adjusted as a long trip proceeds. Turn it off and
+everything reverts to free-flow speeds.
+
 ## Limitations — read this part
 
 - **The map is only as good as OpenStreetMap.** ALPR coverage is crowd-sourced and
@@ -140,13 +169,7 @@ as an artifact.
   need to be.
 - **Trip size is capped** at roughly 4000 km² of bounding box, because the road graph is
   built in phone memory. Long motorway journeys are not what this is for.
-- **No live traffic.** This is not an oversight, and it is unlikely to change. There is no
-  open source of real-time traffic: every provider (Google, TomTom, HERE, INRIX) is
-  commercial, and they work by receiving a continuous stream of where their users are.
-  Wiring one in would mean paying for a key and then sending your position and route to a
-  company whose business is aggregating exactly that — which is the thing this app exists
-  to avoid. A local congestion model based on time of day is possible without any of that,
-  and would be the honest version of this feature; it is not built yet.
+- **Traffic is modelled, never measured.** See below — the distinction matters.
 - **No turn restrictions or lane guidance.** ETAs come from speed limits and junction
   counts, so treat them as estimates.
 - Routing quality depends on the padding around your route (3 km by default). A detour

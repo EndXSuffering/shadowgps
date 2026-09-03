@@ -37,6 +37,14 @@ data class AppSettings(
     /** Draw every known device on the map, not only the ones being avoided. */
     val showAllDetectors: Boolean = true,
     val mapTheme: MapTheme = MapTheme.DAY,
+    /**
+     * Allow for typical congestion at the departure time.
+     *
+     * A model, not a feed. On by default because ETAs that ignore rush hour are wrong far
+     * more often than the model is, but it is a switch because a prior that disagrees with
+     * what you can see out of the windscreen should be dismissable.
+     */
+    val allowForTraffic: Boolean = true,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -76,6 +84,7 @@ class SettingsStore(context: Context) {
             keepScreenOnWhileNavigating = prefs.getBoolean(KEY_SCREEN_ON, defaults.keepScreenOnWhileNavigating),
             showAllDetectors = prefs.getBoolean(KEY_SHOW_ALL, defaults.showAllDetectors),
             mapTheme = MapTheme.fromName(prefs.getString(KEY_MAP_THEME, null)),
+            allowForTraffic = prefs.getBoolean(KEY_TRAFFIC, defaults.allowForTraffic),
         )
     }
 
@@ -88,6 +97,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_SCREEN_ON, settings.keepScreenOnWhileNavigating)
             .putBoolean(KEY_SHOW_ALL, settings.showAllDetectors)
             .putString(KEY_MAP_THEME, settings.mapTheme.name)
+            .putBoolean(KEY_TRAFFIC, settings.allowForTraffic)
             .apply()
     }
 
@@ -99,5 +109,6 @@ class SettingsStore(context: Context) {
         const val KEY_SCREEN_ON = "keep_screen_on"
         const val KEY_SHOW_ALL = "show_all_detectors"
         const val KEY_MAP_THEME = "map_theme"
+        const val KEY_TRAFFIC = "allow_for_traffic"
     }
 }
