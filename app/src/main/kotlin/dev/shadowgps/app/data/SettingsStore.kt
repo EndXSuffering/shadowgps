@@ -9,6 +9,24 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * How bright the map is drawn.
+ *
+ * Raster OpenStreetMap tiles are designed for daylight on a desk, which is painful on a
+ * windscreen at night. Rather than swapping tile providers, the tiles are filtered as they
+ * are drawn, so this costs no extra downloads and works on a saved map.
+ */
+enum class MapTheme(val label: String, val description: String) {
+    DAY("Daylight", "Standard map colours."),
+    DIM("Dimmed", "The same map, darkened for evening driving."),
+    NIGHT("Night", "Inverted to dark, for driving after dark."),
+    ;
+
+    companion object {
+        fun fromName(name: String?): MapTheme = entries.firstOrNull { it.name == name } ?: DAY
+    }
+}
+
 /** Everything the user can change. */
 data class AppSettings(
     val avoidedKinds: Set<DetectorKind> = setOf(DetectorKind.ALPR),
@@ -18,6 +36,7 @@ data class AppSettings(
     val keepScreenOnWhileNavigating: Boolean = true,
     /** Draw every known device on the map, not only the ones being avoided. */
     val showAllDetectors: Boolean = true,
+    val mapTheme: MapTheme = MapTheme.DAY,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -56,6 +75,7 @@ class SettingsStore(context: Context) {
             warnAboutCameras = prefs.getBoolean(KEY_WARN, defaults.warnAboutCameras),
             keepScreenOnWhileNavigating = prefs.getBoolean(KEY_SCREEN_ON, defaults.keepScreenOnWhileNavigating),
             showAllDetectors = prefs.getBoolean(KEY_SHOW_ALL, defaults.showAllDetectors),
+            mapTheme = MapTheme.fromName(prefs.getString(KEY_MAP_THEME, null)),
         )
     }
 
@@ -67,6 +87,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_WARN, settings.warnAboutCameras)
             .putBoolean(KEY_SCREEN_ON, settings.keepScreenOnWhileNavigating)
             .putBoolean(KEY_SHOW_ALL, settings.showAllDetectors)
+            .putString(KEY_MAP_THEME, settings.mapTheme.name)
             .apply()
     }
 
@@ -77,5 +98,6 @@ class SettingsStore(context: Context) {
         const val KEY_WARN = "warn_cameras"
         const val KEY_SCREEN_ON = "keep_screen_on"
         const val KEY_SHOW_ALL = "show_all_detectors"
+        const val KEY_MAP_THEME = "map_theme"
     }
 }

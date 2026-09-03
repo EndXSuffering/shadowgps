@@ -156,22 +156,79 @@ class NavigationEngineTest {
     @Test
     fun `leaving the route is reported after a few fixes`() {
         val route = straightRoute()
+        val config = NavigationConfig()
+        val engine = NavigationEngine(route, config)
+        val coords = listToCoords(route.geometry)
+
+        // Start on the route, then jump 120 m to the side and stay there, still moving.
+        engine.update(PositionFix(interpolateAlongCoords(coords, 100.0), accuracyMeters = 5.0, speedMetersPerSecond = 12.0))
+        val offRoutePoint = destinationPoint(interpolateAlongCoords(coords, 120.0), bearing = 0.0, meters = 120.0)
+        fun strayed() = PositionFix(offRoutePoint, accuracyMeters = 5.0, speedMetersPerSecond = 12.0)
+
+        val first = engine.update(strayed())
+        assertFalse(first.isOffRoute, "a single bad fix should not trigger a reroute")
+
+        repeat(config.offRouteFixes - 2) { engine.update(strayed()) }
+        val settled = engine.update(strayed())
+
+        assertTrue(settled.isOffRoute)
+        assertEquals(120.0, settled.deviationMeters, 10.0)
+        assertTrue(settled.announcements.any { it.kind == Announcement.Kind.OFF_ROUTE })
+    }
+
+    @Test
+    fun `a stationary vehicle is never declared off route`() {
+        // A parked phone wanders by tens of metres. Announcing a wrong turn while sitting
+        // at lights or in a car park is the most annoying possible false positive, and it
+        // used to trigger a full reroute every time.
+        val route = straightRoute()
         val engine = NavigationEngine(route)
         val coords = listToCoords(route.geometry)
 
-        // Start on the route, then jump 120 m to the side and stay there.
         engine.update(PositionFix(interpolateAlongCoords(coords, 100.0), accuracyMeters = 5.0))
-        val offRoutePoint = destinationPoint(interpolateAlongCoords(coords, 120.0), bearing = 0.0, meters = 120.0)
+        val drifted = destinationPoint(interpolateAlongCoords(coords, 100.0), bearing = 0.0, meters = 150.0)
 
-        val first = engine.update(PositionFix(offRoutePoint, accuracyMeters = 5.0))
-        assertFalse(first.isOffRoute, "a single bad fix should not trigger a reroute")
+        repeat(8) { engine.update(PositionFix(drifted, accuracyMeters = 5.0, speedMetersPerSecond = 0.2)) }
+        val state = engine.update(PositionFix(drifted, accuracyMeters = 5.0, speedMetersPerSecond = 0.2))
 
-        engine.update(PositionFix(offRoutePoint, accuracyMeters = 5.0))
-        val third = engine.update(PositionFix(offRoutePoint, accuracyMeters = 5.0))
+        assertFalse(state.isOffRoute)
+    }
 
-        assertTrue(third.isOffRoute)
-        assertEquals(120.0, third.deviationMeters, 10.0)
-        assertTrue(third.announcements.any { it.kind == Announcement.Kind.OFF_ROUTE })
+    @Test
+    fun `being beside the centreline is tolerated`() {
+        // A dual carriageway, a slip road or a wide junction all put an honestly-positioned
+        // vehicle well off the line the router drew.
+        val route = straightRoute()
+        val engine = NavigationEngine(route)
+        val coords = listToCoords(route.geometry)
+
+        engine.update(PositionFix(interpolateAlongCoords(coords, 100.0), accuracyMeters = 8.0, speedMetersPerSecond = 15.0))
+        val beside = destinationPoint(interpolateAlongCoords(coords, 200.0), bearing = 0.0, meters = 35.0)
+
+        repeat(6) { engine.update(PositionFix(beside, accuracyMeters = 8.0, speedMetersPerSecond = 15.0)) }
+        val state = engine.update(PositionFix(beside, accuracyMeters = 8.0, speedMetersPerSecond = 15.0))
+
+        assertFalse(state.isOffRoute, "35 m from the centreline is normal, not a wrong turn")
+    }
+
+    @Test
+    fun `the drawn position follows the route rather than the raw fix`() {
+        val route = straightRoute()
+        val engine = NavigationEngine(route)
+        val coords = listToCoords(route.geometry)
+
+        // A fix 25 m off the road, as happens between buildings.
+        val actual = interpolateAlongCoords(coords, 300.0)
+        val noisy = destinationPoint(actual, bearing = 0.0, meters = 25.0)
+        val state = engine.update(PositionFix(noisy, accuracyMeters = 20.0, speedMetersPerSecond = 10.0))
+
+        // The snapped position is on the road, not out where the fix landed.
+        assertTrue(
+            dev.shadowgps.core.geo.haversineMeters(state.snappedPosition, actual) < 5.0,
+            "the drawn position should sit on the route",
+        )
+        // And it carries the road's direction, so the arrow does not spin.
+        assertEquals(90.0, state.routeHeadingDegrees, 2.0)
     }
 
     @Test

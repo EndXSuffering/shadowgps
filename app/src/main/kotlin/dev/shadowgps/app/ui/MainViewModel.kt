@@ -11,6 +11,8 @@ import dev.shadowgps.app.data.DiskCache
 import dev.shadowgps.app.data.GeocodingClient
 import dev.shadowgps.app.data.OverpassClient
 import dev.shadowgps.app.data.Place
+import dev.shadowgps.app.data.PlaceBook
+import dev.shadowgps.app.data.SavedPlace
 import dev.shadowgps.app.data.RegionStore
 import dev.shadowgps.app.data.SavedRegion
 import dev.shadowgps.app.data.SettingsStore
@@ -111,6 +113,10 @@ data class MainUiState(
     val routedOffline: Boolean = false,
     /** Whatever the map is currently showing, for "save this area". */
     val viewport: BoundingBox? = null,
+    /** Looking at the whole route mid-drive, instead of following the driver. */
+    val overview: Boolean = false,
+    val savedPlaces: List<SavedPlace> = emptyList(),
+    val recentPlaces: List<SavedPlace> = emptyList(),
 ) {
     val selectedRoute: Route? get() = routes.getOrNull(selectedRouteIndex)
 
@@ -132,6 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Saved regions live in filesDir, not cacheDir: Android must not reclaim the map the
     // user deliberately downloaded for a trip with no signal.
     private val regionStore = RegionStore(application.filesDir)
+    private val placeBook = PlaceBook(application.filesDir)
     private val repository = MapDataRepository(overpass, regionStore)
     private val settingsStore = SettingsStore(application)
     private val locationSource = LocationSource(application)
@@ -157,6 +164,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             NavigationHub.stopRequests.collect { stopNavigation() }
+        }
+        viewModelScope.launch {
+            placeBook.places.collect {
+                _state.update { current ->
+                    current.copy(savedPlaces = placeBook.saved, recentPlaces = placeBook.recents)
+                }
+            }
         }
         refreshSavedRegions()
         refreshPermissionState()
@@ -452,8 +466,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- navigation
 
+    /** Steps back to the whole route mid-drive, or returns to following the driver. */
+    fun setOverview(showing: Boolean) = _state.update { it.copy(overview = showing) }
+
+    // ---------------------------------------------------------------- saved addresses
+
+    fun starPlace(place: Place, starred: Boolean) = placeBook.setStarred(place, starred)
+
+    fun forgetPlace(saved: SavedPlace) = placeBook.forget(saved)
+
+    fun clearRecentPlaces() = placeBook.clearRecents()
+
+    fun isStarred(place: Place?): Boolean = place != null && placeBook.isStarred(place)
+
     fun startNavigation() {
         val route = _state.value.selectedRoute ?: return
+        _state.value.destination?.let(placeBook::remember)
         val settings = _state.value.settings
 
         // The route starts somewhere the driver is not. Guiding from its first turn would
@@ -600,6 +628,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 navigation = null,
                 isRerouting = false,
                 awaitingJoin = false,
+                overview = false,
             )
         }
     }
@@ -616,6 +645,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 routes = emptyList(),
                 provisionalStart = null,
                 awaitingJoin = false,
+                overview = false,
             )
         }
     }
@@ -824,7 +854,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val SEARCH_DEBOUNCE_MILLIS = 350L
-        const val REROUTE_COOLDOWN_MILLIS = 12_000L
+        /**
+         * Minimum gap between reroutes.
+         *
+         * Replanning is the most expensive thing the app does, and a driver held off the
+         * centreline — a slip road, a wide junction, a parallel carriageway — can report
+         * off-route repeatedly without having gone anywhere wrong.
+         */
+        const val REROUTE_COOLDOWN_MILLIS = 25_000L
         const val DETECTOR_LAYER_MAX_KM2 = 900.0
 
         /** How far outside the view to keep drawn cameras, so a small pan shows no gap. */

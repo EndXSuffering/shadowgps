@@ -76,9 +76,14 @@ fun MapScreen(viewModel: MainViewModel) {
             origin = state.origin,
             destination = state.destination,
             joinPoint = state.provisionalStart?.joinPoint,
-            followUser = state.phase == Phase.NAVIGATING,
+            followUser = state.phase == Phase.NAVIGATING && !state.overview,
             showDetectorRanges = state.settings.showAllDetectors,
             recenterTick = state.recenterTick,
+            mapTheme = state.settings.mapTheme,
+            // While guiding, draw the route-matched position rather than the raw fix.
+            vehiclePosition = state.navigation?.snappedPosition,
+            vehicleHeadingDegrees = state.navigation?.routeHeadingDegrees,
+            overview = state.overview,
             onLongPress = { position -> pendingPin = position },
             onDetectorTapped = { detector -> tappedDetector = detector },
             onViewportChanged = viewModel::loadDetectorsFor,
@@ -114,8 +119,12 @@ fun MapScreen(viewModel: MainViewModel) {
                     suggestions = state.suggestions,
                     searching = state.searching,
                     destination = state.destination,
+                    savedPlaces = state.savedPlaces,
+                    recentPlaces = state.recentPlaces,
+                    starredKeys = state.savedPlaces.map { placeKey(it.place) }.toSet(),
                     onQueryChanged = viewModel::onQueryChanged,
                     onPick = viewModel::chooseDestination,
+                    onStar = viewModel::starPlace,
                     onClear = {
                         viewModel.clearSearch()
                         viewModel.clearDestination()
@@ -208,6 +217,8 @@ fun MapScreen(viewModel: MainViewModel) {
                         navigation = state.navigation!!,
                         route = state.selectedRoute!!,
                         units = state.settings.units,
+                        overview = state.overview,
+                        onToggleOverview = { viewModel.setOverview(!state.overview) },
                         onStop = viewModel::stopNavigation,
                         modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
                     )

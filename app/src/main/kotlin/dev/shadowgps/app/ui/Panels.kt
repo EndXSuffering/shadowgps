@@ -26,11 +26,15 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.NearMe
 import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -60,6 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.shadowgps.app.data.AppSettings
 import dev.shadowgps.app.data.Place
+import dev.shadowgps.app.data.MapTheme
+import dev.shadowgps.app.data.SavedPlace
 import dev.shadowgps.app.data.SavedRegion
 import dev.shadowgps.app.ui.theme.ShadowColors
 import dev.shadowgps.core.detect.DetectorKind
@@ -81,8 +87,12 @@ fun SearchPanel(
     suggestions: List<Place>,
     searching: Boolean,
     destination: Place?,
+    savedPlaces: List<SavedPlace>,
+    recentPlaces: List<SavedPlace>,
+    starredKeys: Set<String>,
     onQueryChanged: (String) -> Unit,
     onPick: (Place) -> Unit,
+    onStar: (Place, Boolean) -> Unit,
     onClear: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -131,7 +141,12 @@ fun SearchPanel(
             }
         }
 
-        if (suggestions.isNotEmpty()) {
+        // With nothing typed, offer what the driver already goes to rather than a blank
+        // panel: the whole point of saving an address is not typing it again.
+        val showingShortcuts = query.isBlank() && suggestions.isEmpty() &&
+            (savedPlaces.isNotEmpty() || recentPlaces.isNotEmpty())
+
+        if (suggestions.isNotEmpty() || showingShortcuts) {
             Spacer(Modifier.height(8.dp))
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -139,33 +154,46 @@ fun SearchPanel(
                 tonalElevation = 3.dp,
                 shadowElevation = 8.dp,
             ) {
-                LazyColumn(modifier = Modifier.heightIn(max = 280.dp)) {
-                    items(suggestions) { place ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(place) }
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                Icons.Rounded.Place,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                    if (suggestions.isNotEmpty()) {
+                        items(suggestions) { place ->
+                            PlaceRow(
+                                title = place.shortName,
+                                // The full address is the whole point of a search result —
+                                // one ellipsised line could not tell two similar streets
+                                // in different towns apart.
+                                detail = place.detail,
+                                icon = Icons.Rounded.Place,
+                                starred = starredKeys.contains(placeKey(place)),
+                                onClick = { onPick(place) },
+                                onStar = { onStar(place, !starredKeys.contains(placeKey(place))) },
                             )
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(place.shortName, style = MaterialTheme.typography.bodyLarge)
-                                place.detail?.let {
-                                    Text(
-                                        it,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
+                        }
+                    } else {
+                        if (savedPlaces.isNotEmpty()) {
+                            item { SectionLabel("Saved") }
+                            items(savedPlaces) { saved ->
+                                PlaceRow(
+                                    title = saved.title,
+                                    detail = saved.place.detail,
+                                    icon = Icons.Rounded.Star,
+                                    starred = true,
+                                    onClick = { onPick(saved.place) },
+                                    onStar = { onStar(saved.place, false) },
+                                )
+                            }
+                        }
+                        if (recentPlaces.isNotEmpty()) {
+                            item { SectionLabel("Recent") }
+                            items(recentPlaces) { recent ->
+                                PlaceRow(
+                                    title = recent.title,
+                                    detail = recent.place.detail,
+                                    icon = Icons.Rounded.History,
+                                    starred = false,
+                                    onClick = { onPick(recent.place) },
+                                    onStar = { onStar(recent.place, true) },
+                                )
                             }
                         }
                     }
@@ -174,6 +202,65 @@ fun SearchPanel(
         }
     }
 }
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
+    )
+}
+
+@Composable
+private fun PlaceRow(
+    title: String,
+    detail: String?,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    starred: Boolean,
+    onClick: () -> Unit,
+    onStar: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (starred) ShadowColors.Caution else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            detail?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        IconButton(onClick = onStar) {
+            Icon(
+                if (starred) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                contentDescription = if (starred) "Remove from saved" else "Save this address",
+                tint = if (starred) ShadowColors.Caution else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Matches [dev.shadowgps.app.data.SavedPlace.key] so starred state lines up. */
+internal fun placeKey(place: Place): String =
+    "%.5f,%.5f".format(place.position.lat, place.position.lon)
 
 /**
  * The route chooser.
@@ -543,6 +630,8 @@ fun NavigationFooter(
     navigation: NavigationState,
     route: Route,
     units: UnitSystem,
+    overview: Boolean,
+    onToggleOverview: () -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -574,6 +663,18 @@ fun NavigationFooter(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // Looking over the route without abandoning the trip: guidance keeps running,
+            // the map just stops chasing the vehicle.
+            OutlinedButton(onClick = onToggleOverview, shape = RoundedCornerShape(12.dp)) {
+                Icon(
+                    if (overview) Icons.Rounded.NearMe else Icons.Rounded.Map,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (overview) "Follow" else "Route")
+            }
+            Spacer(Modifier.width(8.dp))
             OutlinedButton(onClick = onStop, shape = RoundedCornerShape(12.dp)) {
                 Text("Stop")
             }
@@ -685,6 +786,55 @@ fun SettingsSheet(
                 checked = settings.showAllDetectors,
                 onCheckedChange = { on -> onUpdate { it.copy(showAllDetectors = on) } },
             )
+            Spacer(Modifier.height(8.dp))
+            Text("Map brightness", style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MapTheme.entries.forEach { theme ->
+                    val selected = settings.mapTheme == theme
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        border = if (selected) {
+                            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                        } else {
+                            null
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onUpdate { it.copy(mapTheme = theme) } },
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Rounded.Map,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(theme.label, style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
+            }
+            Text(
+                settings.mapTheme.description,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+
             SettingRow(
                 title = "Imperial units",
                 subtitle = "Miles and feet instead of kilometres and metres.",

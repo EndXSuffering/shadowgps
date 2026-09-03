@@ -18,10 +18,30 @@ import kotlin.math.roundToInt
 object Directions {
 
     /** Below this the road is just bending and needs no instruction. */
-    private const val BEND_DEGREES = 22.0
+    private const val BEND_DEGREES = 28.0
 
-    /** A name change on an almost-straight road is worth mentioning, but only just. */
-    private const val NAME_CHANGE_DEGREES = 10.0
+    /**
+     * Distance over which a turn angle is measured.
+     *
+     * Comparing the single vertex pair either side of a junction measures mapping noise as
+     * much as geometry; over twenty-five metres the noise averages out and what is left is
+     * the turn a driver would actually perceive.
+     */
+    private const val TURN_BASELINE_METERS = 25.0
+
+    /**
+     * Two ways out of a junction closer than this in heading are a fork the driver has to
+     * choose between, so one gets a "keep left"/"keep right" even though neither is a turn.
+     */
+    private const val FORK_SEPARATION_DEGREES = 45.0
+
+    /**
+     * A corner this sharp is announced even where the driver has no alternative.
+     *
+     * Well above [BEND_DEGREES]: a road that merely bends round without a junction needs no
+     * commentary, but one that turns ninety degrees does, choice or not.
+     */
+    private const val FORCED_TURN_DEGREES = 60.0
 
     fun build(
         graph: RoadGraph,
@@ -86,13 +106,10 @@ object Directions {
                 continue
             }
 
-            val turn = signedTurnDegrees(previous.endHeading, next.startHeading)
-            val nameChanged = previous.displayName != next.displayName
-            val isDecision = abs(turn) >= BEND_DEGREES ||
-                (nameChanged && abs(turn) >= NAME_CHANGE_DEGREES) ||
-                (previous.roundabout && !next.roundabout)
+            val decision = decisionAt(graph, previous, next)
+            val turn = decision.turnDegrees
 
-            if (isDecision) {
+            if (decision.isManeuver) {
                 // "Take the 2nd exit onto Mill Road" needs the name of the road being left
                 // *onto*, which is the one after the ring, not the ring itself.
                 val exitingRoundabout = previous.roundabout && !next.roundabout
@@ -106,10 +123,10 @@ object Directions {
                 groupStart = index
                 // Leaving a roundabout is not a second manoeuvre; the exit instruction
                 // already told the driver where to go.
-                pendingManeuver = if (exitingRoundabout) {
-                    Maneuver.CONTINUE
-                } else {
-                    classify(turn, previous.reverseIndex == next.index)
+                pendingManeuver = when {
+                    exitingRoundabout -> Maneuver.CONTINUE
+                    decision.forkSide != null -> decision.forkSide
+                    else -> classify(turn, previous.reverseIndex == next.index)
                 }
                 pendingExit = null
                 pendingPoint = next.startPoint
@@ -131,6 +148,85 @@ object Directions {
             ),
         )
         return steps
+    }
+
+    /** Whether a junction needs telling the driver about, and what to say. */
+    data class Decision(
+        val turnDegrees: Double,
+        val isManeuver: Boolean,
+        /** Set for a fork, where the instruction is "keep left"/"keep right", not a turn. */
+        val forkSide: Maneuver? = null,
+    )
+
+    /**
+     * Decides whether a junction earns an instruction.
+     *
+     * Three rules, each removing a class of instruction that was being given for no reason:
+     *
+     *  - **No choice, no instruction.** If the only way on is the way the driver is already
+     *    going, saying anything is noise however much the road bends. Roads are split into
+     *    edges at every junction, so a curving street generates plenty of angle with no
+     *    decision attached to it.
+     *  - **A road is the same road across a missing tag.** OSM frequently splits a street
+     *    and leaves the name off one half. Treating name-to-null as a change is what
+     *    produced a stream of anonymous "Continue straight" instructions on a street whose
+     *    name never actually changed.
+     *  - **A fork still needs a side**, even when neither branch is a turn — that is the
+     *    one case where a small angle genuinely matters.
+     */
+    fun decisionAt(graph: RoadGraph, previous: RoadEdge, next: RoadEdge): Decision {
+        val turn = signedTurnDegrees(
+            previous.headingApproaching(TURN_BASELINE_METERS),
+            next.headingLeaving(TURN_BASELINE_METERS),
+        )
+
+        // Leaving a roundabout is always worth marking, choice or not.
+        if (previous.roundabout && !next.roundabout) return Decision(turn, isManeuver = true)
+
+        val alternatives = alternativesAt(graph, previous, next)
+        if (alternatives.isEmpty()) {
+            // Nowhere else to go, so no decision to announce — unless the road genuinely
+            // turns a corner, which the driver has to be told about whether or not there
+            // was any choice about it.
+            return Decision(turn, isManeuver = abs(turn) >= FORCED_TURN_DEGREES)
+        }
+
+        if (abs(turn) >= BEND_DEGREES) return Decision(turn, isManeuver = true)
+
+        // A fork: another way out of this junction is also near-straight, so "carry on"
+        // would not tell the driver which side to take. Checked before the name, because
+        // which side to take matters more than what the road is called.
+        val rival = alternatives.minByOrNull { abs(it) }
+        if (rival != null) {
+            val ambiguous = abs(rival) < BEND_DEGREES &&
+                abs(signedTurnDegrees(rival, turn)) < FORK_SEPARATION_DEGREES &&
+                abs(turn - rival) > 1.0
+            if (ambiguous) {
+                return Decision(
+                    turnDegrees = turn,
+                    isManeuver = true,
+                    forkSide = if (turn > rival) Maneuver.SLIGHT_RIGHT else Maneuver.SLIGHT_LEFT,
+                )
+            }
+        }
+
+        // Same physical way, or a name that merely went missing, is not a change of road.
+        val sameWay = previous.wayId == next.wayId
+        val before = previous.displayName
+        val after = next.displayName
+        val nameChanged = !sameWay && before != null && after != null && before != after
+        return Decision(turn, isManeuver = nameChanged)
+    }
+
+    /** Turn angles of the other ways out of the junction, excluding the u-turn and the one taken. */
+    private fun alternativesAt(graph: RoadGraph, previous: RoadEdge, next: RoadEdge): List<Double> {
+        val approach = previous.headingApproaching(TURN_BASELINE_METERS)
+        val options = ArrayList<Double>(3)
+        graph.forEachOutgoing(previous.toNode) { candidate ->
+            if (candidate == previous.reverseIndex || candidate == next.index) return@forEachOutgoing
+            options.add(signedTurnDegrees(approach, graph.edges[candidate].headingLeaving(TURN_BASELINE_METERS)))
+        }
+        return options
     }
 
     private data class RoundaboutExit(val exitNumber: Int, val leaveIndex: Int)

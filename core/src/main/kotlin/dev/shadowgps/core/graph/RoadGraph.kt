@@ -55,6 +55,32 @@ class RoadEdge(
 
     val bounds: BoundingBox by lazy(LazyThreadSafetyMode.NONE) { coordsBounds(coords) }
 
+    /**
+     * Direction of travel over the first [meters] of the edge, rather than over its first
+     * vertex pair.
+     *
+     * A road's final vertex before a junction is often only a couple of metres long and
+     * carries whatever wobble the mapper's GPS had that day. Comparing those terminal
+     * segments across a junction produces angles of twenty or thirty degrees on a road that
+     * is visibly straight, which is where phantom "bear right" instructions come from.
+     * Measuring over a real distance averages the wobble out.
+     */
+    fun headingLeaving(meters: Double): Double {
+        if (pointCount < 2) return 0.0
+        val reach = minOf(meters, lengthMeters)
+        if (reach <= 0.0) return startHeading
+        return bearingDegrees(startPoint, dev.shadowgps.core.geo.interpolateAlongCoords(coords, reach))
+    }
+
+    /** Direction of travel over the last [meters] before the edge ends. See [headingLeaving]. */
+    fun headingApproaching(meters: Double): Double {
+        if (pointCount < 2) return 0.0
+        val reach = minOf(meters, lengthMeters)
+        if (reach <= 0.0) return endHeading
+        val from = dev.shadowgps.core.geo.interpolateAlongCoords(coords, lengthMeters - reach)
+        return bearingDegrees(from, endPoint)
+    }
+
     /** Display name, preferring the street name and falling back to the route number. */
     val displayName: String? get() = name ?: ref
 

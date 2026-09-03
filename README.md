@@ -140,8 +140,15 @@ as an artifact.
   need to be.
 - **Trip size is capped** at roughly 4000 km² of bounding box, because the road graph is
   built in phone memory. Long motorway journeys are not what this is for.
-- **No live traffic**, no turn restrictions, no lane guidance. ETAs come from speed limits
-  and junction counts, so treat them as estimates.
+- **No live traffic.** This is not an oversight, and it is unlikely to change. There is no
+  open source of real-time traffic: every provider (Google, TomTom, HERE, INRIX) is
+  commercial, and they work by receiving a continuous stream of where their users are.
+  Wiring one in would mean paying for a key and then sending your position and route to a
+  company whose business is aggregating exactly that — which is the thing this app exists
+  to avoid. A local congestion model based on time of day is possible without any of that,
+  and would be the honest version of this feature; it is not built yet.
+- **No turn restrictions or lane guidance.** ETAs come from speed limits and junction
+  counts, so treat them as estimates.
 - Routing quality depends on the padding around your route (3 km by default). A detour
   that would need to swing wider than that will not be found.
 - **If your location fix is poor** — indoors, underground, or under tall buildings — the

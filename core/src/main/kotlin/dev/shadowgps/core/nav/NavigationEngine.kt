@@ -43,10 +43,23 @@ data class Announcement(
 
 data class NavigationConfig(
     val units: UnitSystem = UnitSystem.METRIC,
-    /** Perpendicular distance from the line that counts as having left it. */
-    val offRouteMeters: Double = 40.0,
+    /**
+     * Perpendicular distance from the line that counts as having left it.
+     *
+     * Generous on purpose. The route is a centreline, so a dual carriageway, a slip road
+     * beside the main one, or simply a wide junction puts an honestly-positioned vehicle
+     * tens of metres off it, and every metre shaved here buys another spurious reroute.
+     */
+    val offRouteMeters: Double = 55.0,
     /** Consecutive off-route fixes before the engine says so, to ride out GPS noise. */
-    val offRouteFixes: Int = 3,
+    val offRouteFixes: Int = 4,
+    /**
+     * Below this speed a deviation is not believed.
+     *
+     * A stationary phone wanders by tens of metres, and a car park or a set of lights is
+     * exactly where that happens — precisely the wrong moment to announce a wrong turn.
+     */
+    val movingSpeedMetersPerSecond: Double = 1.5,
     /** Distances before a turn at which to speak. */
     val maneuverAnnounceMeters: List<Double> = listOf(600.0, 200.0, 50.0),
     /** How far ahead to warn about a camera. */
@@ -58,7 +71,16 @@ data class NavigationConfig(
 
 /** Everything the navigation UI needs for one frame. */
 data class NavigationState(
+    /**
+     * The vehicle's position matched onto the route.
+     *
+     * This, not the raw fix, is what should be drawn. A raw GPS position jitters between
+     * buildings and sits off the carriageway, so an arrow drawn from it wanders across
+     * fields and rooftops; matched to the route it moves along the road the driver is on.
+     */
     val snappedPosition: LatLon,
+    /** Direction of the route where the vehicle is, for orienting the map and the arrow. */
+    val routeHeadingDegrees: Double,
     val distanceAlongRouteMeters: Double,
     val distanceRemainingMeters: Double,
     val secondsRemaining: Double,
@@ -109,8 +131,12 @@ class NavigationEngine(
         initialized = true
 
         val deviation = projection.distanceMeters
-        val tolerance = max(config.offRouteMeters, (fix.accuracyMeters ?: 0.0) * 1.5)
-        if (deviation > tolerance) consecutiveOffRoute++ else consecutiveOffRoute = 0
+        val tolerance = max(config.offRouteMeters, (fix.accuracyMeters ?: 0.0) * 2.0)
+        // A fix only counts against the driver if the device is confident enough to be
+        // worth believing and the vehicle is actually moving.
+        val moving = (fix.speedMetersPerSecond ?: config.movingSpeedMetersPerSecond) >=
+            config.movingSpeedMetersPerSecond
+        if (deviation > tolerance && moving) consecutiveOffRoute++ else consecutiveOffRoute = 0
         val offRoute = consecutiveOffRoute >= config.offRouteFixes
 
         val remaining = (totalLength - progressMeters).coerceAtLeast(0.0)
@@ -146,6 +172,7 @@ class NavigationEngine(
 
         return NavigationState(
             snappedPosition = projection.point,
+            routeHeadingDegrees = projection.headingDegrees,
             distanceAlongRouteMeters = progressMeters,
             distanceRemainingMeters = remaining,
             secondsRemaining = estimateRemainingSeconds(remaining),
@@ -171,8 +198,11 @@ class NavigationEngine(
     private fun matchToRoute(fix: PositionFix): dev.shadowgps.core.geo.PolylineProjection {
         if (!initialized) return projectOntoCoords(coords, fix.position)
 
-        val lookBehind = 60.0
-        val lookAhead = max(250.0, (fix.speedMetersPerSecond ?: 0.0) * 15.0)
+        // Wide enough to still contain the vehicle after a gap in fixes — a tunnel, a lost
+        // signal, a stretch at speed. Too narrow a window projects onto the window's own
+        // edge, which reads as a huge deviation and triggers a reroute that was never needed.
+        val lookBehind = 120.0
+        val lookAhead = max(500.0, (fix.speedMetersPerSecond ?: 0.0) * 25.0)
         val from = (progressMeters - lookBehind).coerceIn(0.0, totalLength)
         val to = (progressMeters + lookAhead).coerceIn(from, totalLength)
         if (to - from < 1.0) return projectOntoCoords(coords, fix.position)

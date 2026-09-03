@@ -1,5 +1,8 @@
 package dev.shadowgps.app.ui
 
+import android.graphics.ColorFilter
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.drawable.Drawable
 import androidx.compose.runtime.Composable
@@ -21,6 +24,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import dev.shadowgps.app.R
+import dev.shadowgps.app.data.MapTheme
 import dev.shadowgps.app.data.Place
 import dev.shadowgps.app.ui.theme.ShadowColors
 import dev.shadowgps.core.detect.Detector
@@ -66,6 +70,17 @@ fun MapCanvas(
     followUser: Boolean,
     showDetectorRanges: Boolean,
     recenterTick: Int,
+    mapTheme: MapTheme,
+    /**
+     * Where to draw the vehicle, and which way it is pointing.
+     *
+     * While navigating this is the position matched onto the route rather than the raw
+     * fix, so the arrow travels along the road instead of wandering off it.
+     */
+    vehiclePosition: LatLon?,
+    vehicleHeadingDegrees: Double?,
+    /** Frame the whole route instead of following the driver. */
+    overview: Boolean,
     onLongPress: (LatLon) -> Unit,
     onDetectorTapped: (Detector) -> Unit,
     onViewportChanged: (GeoBox) -> Unit,
@@ -218,31 +233,49 @@ fun MapCanvas(
     val centredOnUser = remember { mutableStateOf(false) }
 
     // The hot path: one marker moves, nothing is rebuilt.
-    LaunchedEffect(userFix, followUser) {
-        val fix = userFix ?: return@LaunchedEffect
+    LaunchedEffect(userFix, vehiclePosition, vehicleHeadingDegrees, followUser) {
+        // Prefer the route-matched position; fall back to the raw fix when not navigating.
+        val shown = vehiclePosition ?: userFix?.position ?: return@LaunchedEffect
+        // A GPS bearing is meaningless below walking pace and absent on many fixes, which
+        // is why the arrow used to spin on the spot at every red light.
+        val heading = vehicleHeadingDegrees
+            ?: userFix?.bearingDegrees?.takeIf { (userFix.speedMetersPerSecond ?: 0.0) > 1.5 }
 
         if (!centredOnUser.value) {
             centredOnUser.value = true
             mapView.controller.setZoom(16.0)
-            mapView.controller.setCenter(GeoPoint(fix.position.lat, fix.position.lon))
+            mapView.controller.setCenter(GeoPoint(shown.lat, shown.lon))
             // setCenter does not always emit a scroll event, and this is the jump that
             // first brings the driver's own surroundings into view — the cameras that
             // matter most. Report it directly rather than hoping for a callback.
             viewportRequest.value = visibleBox(mapView)
         }
 
-        vehicle.position = GeoPoint(fix.position.lat, fix.position.lon)
-        vehicle.rotation = -(fix.bearingDegrees?.toFloat() ?: 0f)
+        vehicle.position = GeoPoint(shown.lat, shown.lon)
+        heading?.let { vehicle.rotation = -it.toFloat() }
 
         if (followUser) {
             mapView.controller.animateTo(vehicle.position)
             // Rotating the map to the heading is what makes a turn instruction read
             // correctly at a junction.
-            fix.bearingDegrees?.let { mapView.mapOrientation = -it.toFloat() }
+            heading?.let { mapView.mapOrientation = -it.toFloat() }
             if (mapView.zoomLevelDouble < 16.0) mapView.controller.setZoom(17.0)
         } else if (mapView.mapOrientation != 0f) {
             mapView.mapOrientation = 0f
         }
+        mapView.invalidate()
+    }
+
+    // Stepping back to see the whole route mid-drive, and returning to the driver after.
+    LaunchedEffect(overview, routes, selectedRouteIndex) {
+        if (!overview) return@LaunchedEffect
+        val route = routes.getOrNull(selectedRouteIndex) ?: return@LaunchedEffect
+        mapView.mapOrientation = 0f
+        mapView.zoomToBoundingBox(GeoBox.of(route.geometry).expandMeters(300.0).toOsm(), true, ROUTE_PADDING_PX)
+    }
+
+    LaunchedEffect(mapTheme) {
+        mapView.overlayManager.tilesOverlay.setColorFilter(tileFilterFor(mapTheme))
         mapView.invalidate()
     }
 
@@ -285,6 +318,46 @@ private fun visibleBox(map: MapView): GeoBox? {
 
 /** Settling time after the last map movement before the camera layer is fetched. */
 private const val VIEWPORT_DEBOUNCE_MILLIS = 400L
+
+/**
+ * Recolours map tiles as they are drawn.
+ *
+ * Filtering at draw time rather than switching tile source means no extra downloads, no
+ * second tile cache, and it works identically on a saved offline map.
+ */
+private fun tileFilterFor(theme: MapTheme): ColorFilter? = when (theme) {
+    MapTheme.DAY -> null
+
+    // Straight multiplicative dim: the same map, turned down.
+    MapTheme.DIM -> ColorMatrixColorFilter(
+        ColorMatrix(
+            floatArrayOf(
+                0.62f, 0f, 0f, 0f, 0f,
+                0f, 0.62f, 0f, 0f, 0f,
+                0f, 0f, 0.62f, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f,
+            ),
+        ),
+    )
+
+    // Invert, then rotate the hue back so the result reads as a dark map rather than a
+    // photographic negative: roads stay pale on dark ground and greens stay green.
+    MapTheme.NIGHT -> ColorMatrixColorFilter(
+        ColorMatrix().apply {
+            set(
+                ColorMatrix(
+                    floatArrayOf(
+                        -1f, 0f, 0f, 0f, 255f,
+                        0f, -1f, 0f, 0f, 255f,
+                        0f, 0f, -1f, 0f, 255f,
+                        0f, 0f, 0f, 1f, 0f,
+                    ),
+                ),
+            )
+            postConcat(ColorMatrix().apply { setSaturation(0.4f) })
+        },
+    )
+}
 
 private const val ROUTE_PADDING_PX = 140
 
