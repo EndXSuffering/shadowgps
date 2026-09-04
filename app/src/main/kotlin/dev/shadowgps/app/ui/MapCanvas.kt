@@ -30,9 +30,14 @@ import dev.shadowgps.app.ui.theme.ShadowColors
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.geo.coordsCount
+import dev.shadowgps.core.geo.coordsToList
 import dev.shadowgps.core.geo.destinationPoint
+import dev.shadowgps.core.geo.listToCoords
+import dev.shadowgps.core.geo.sliceCoords
 import dev.shadowgps.core.nav.PositionFix
 import dev.shadowgps.core.routing.Route
+import dev.shadowgps.core.traffic.CongestionLevel
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.events.MapListener
 import org.osmdroid.events.ScrollEvent
@@ -178,6 +183,9 @@ fun MapCanvas(
         }
         routes.getOrNull(selectedRouteIndex)?.let { selected ->
             routeLayer.items.add(polylineFor(mapView, selected, selected = true))
+            // Traffic sits on top of the chosen line, so the driver can see *where* the
+            // modelled delay is rather than only that the estimate went up.
+            congestionLines(mapView, selected).forEach { routeLayer.items.add(it) }
         }
 
         // Frame the whole trip whenever the set of routes changes, unless the driver is
@@ -378,6 +386,40 @@ private fun polylineFor(map: MapView, route: Route, selected: Boolean): Polyline
     }
 
 /**
+ * Coloured overlays for the stretches the model expects to be moving badly.
+ *
+ * Drawn over the route's own line rather than replacing it: spans are measured in metres
+ * along the route and slicing them back out is subject to rounding, so anything that falls
+ * between two spans shows the route colour underneath instead of a hole in the line.
+ *
+ * Only notable bands are drawn. Painting the clear stretches too would mean colouring the
+ * whole route on any city trip, at which point the colour stops telling the driver anything.
+ */
+private fun congestionLines(map: MapView, route: Route): List<Polyline> {
+    val notable = route.congestionSpans.filter { it.level.isNotable && it.lengthMeters > 1.0 }
+    if (notable.isEmpty()) return emptyList()
+
+    val coords = listToCoords(route.geometry)
+    return notable.mapNotNull { span ->
+        val piece = sliceCoords(coords, span.fromMeters, span.toMeters)
+        if (coordsCount(piece) < 2) return@mapNotNull null
+        Polyline(map).apply {
+            setPoints(coordsToList(piece).map { GeoPoint(it.lat, it.lon) })
+            outlinePaint.apply {
+                color = colorFor(span.level).toArgb()
+                // Matches the selected route's width so the coloured stretch reads as part
+                // of the same line, and butt caps keep it from bleeding past its span.
+                strokeWidth = 16f
+                strokeCap = Paint.Cap.BUTT
+                strokeJoin = Paint.Join.ROUND
+                isAntiAlias = true
+            }
+            infoWindow = null
+        }
+    }
+}
+
+/**
  * The area a device can see.
  *
  * Cameras with a mapped facing direction get a wedge showing where they actually look;
@@ -454,6 +496,14 @@ private fun tinted(map: MapView, iconRes: Int, color: Int): Drawable? {
     val drawable = ContextCompat.getDrawable(map.context, iconRes)?.mutate() ?: return null
     DrawableCompat.setTint(DrawableCompat.wrap(drawable), color)
     return drawable
+}
+
+/** Traffic scale, shared by the map line and the directions list. */
+fun colorFor(level: CongestionLevel): androidx.compose.ui.graphics.Color = when (level) {
+    CongestionLevel.FREE -> ShadowColors.RouteSelected
+    CongestionLevel.LIGHT -> ShadowColors.TrafficLight
+    CongestionLevel.HEAVY -> ShadowColors.TrafficHeavy
+    CongestionLevel.SEVERE -> ShadowColors.TrafficSevere
 }
 
 /** Colour scale shared with the route cards: red is watched, grey is background noise. */

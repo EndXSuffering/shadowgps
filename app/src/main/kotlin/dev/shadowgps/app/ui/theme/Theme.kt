@@ -36,6 +36,17 @@ object ShadowColors {
     /** Route line colours: the chosen one, and the alternatives behind it. */
     val RouteSelected = Color(0xFF38BDF8)
     val RouteAlternate = Color(0xFF64748B)
+
+    /**
+     * Congestion bands painted over the chosen route.
+     *
+     * Deliberately the familiar yellow/orange/red rather than the exposure scale: a driver
+     * reads traffic colour on a map without being taught it, and reusing the exposure
+     * greens here would make one colour mean two different things.
+     */
+    val TrafficLight = Color(0xFFFACC15)
+    val TrafficHeavy = Color(0xFFFB923C)
+    val TrafficSevere = Color(0xFFEF4444)
 }
 
 private val DarkScheme = darkColorScheme(

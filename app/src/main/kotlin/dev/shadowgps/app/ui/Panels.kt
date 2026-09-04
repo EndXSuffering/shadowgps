@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.material.icons.rounded.FormatListNumbered
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.NearMe
@@ -65,6 +68,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -89,6 +93,9 @@ import dev.shadowgps.core.routing.Maneuver
 import dev.shadowgps.core.routing.PrivacyProfile
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
+import dev.shadowgps.core.routing.RouteStep
+import dev.shadowgps.core.traffic.CongestionLevel
+import dev.shadowgps.core.traffic.CongestionSpan
 import dev.shadowgps.core.traffic.TrafficModel
 
 /** Destination entry: a text field that turns into a list of matches. */
@@ -879,6 +886,14 @@ fun SettingsSheet(
                 onCheckedChange = { on -> onUpdate { it.copy(allowForTraffic = on) } },
             )
             SettingRow(
+                title = "Avoid heavy traffic",
+                subtitle = "Take a calmer road even when it is not the quickest. Costs time " +
+                    "by design — turn it off if you would rather just get there.",
+                accent = ShadowColors.TrafficHeavy,
+                checked = settings.avoidHeavyTraffic,
+                onCheckedChange = { on -> onUpdate { it.copy(avoidHeavyTraffic = on) } },
+            )
+            SettingRow(
                 title = "Show coverage on the map",
                 subtitle = "Shade what each device can see.",
                 checked = settings.showAllDetectors,
@@ -1109,6 +1124,185 @@ private fun kindExplanation(kind: DetectorKind): String = when (kind) {
     DetectorKind.RED_LIGHT_CAMERA -> "Photographs vehicles that jump the lights."
     DetectorKind.CCTV -> "General traffic cameras watching a road."
     DetectorKind.TOLL_GANTRY -> "Reads plates or transponders to bill you."
+}
+
+/**
+ * Every instruction on the route, start to finish.
+ *
+ * A side panel rather than a sheet, because it is meant to be readable *while* driving:
+ * it can sit open for the length of a trip beside the map without covering the road ahead
+ * or the next-turn card, and it scrolls itself to whichever step is being driven so the
+ * driver never has to hunt for their place in it.
+ */
+@Composable
+fun DirectionsPanel(
+    steps: List<RouteStep>,
+    /** Which step is being driven, or null when nobody is navigating yet. */
+    currentStepIndex: Int?,
+    congestionSpans: List<CongestionSpan>,
+    units: UnitSystem,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val listState = rememberLazyListState()
+
+    // Follow the driver down the list, but only far enough to keep the current step in
+    // view — yanking it to the top would hide the turns they are about to need.
+    LaunchedEffect(currentStepIndex) {
+        val index = currentStepIndex ?: return@LaunchedEffect
+        if (index in steps.indices) listState.animateScrollToItem(index)
+    }
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 12.dp,
+    ) {
+        Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Directions",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Hide directions")
+                }
+            }
+
+            LazyColumn(state = listState) {
+                itemsIndexed(steps) { index, step ->
+                    DirectionRow(
+                        step = step,
+                        driving = index == currentStepIndex,
+                        // A step already behind the driver is context, not instruction.
+                        passed = currentStepIndex != null && index < currentStepIndex,
+                        level = congestionOn(step, congestionSpans),
+                        units = units,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DirectionRow(
+    step: RouteStep,
+    driving: Boolean,
+    passed: Boolean,
+    level: CongestionLevel,
+    units: UnitSystem,
+) {
+    val contentColor = when {
+        driving -> MaterialTheme.colorScheme.onSurface
+        passed -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                if (driving) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent,
+                RoundedCornerShape(8.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            maneuverIcon(step.maneuver),
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = if (driving) MaterialTheme.colorScheme.primary else contentColor,
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                step.instruction,
+                style = MaterialTheme.typography.bodyMedium,
+                color = contentColor,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    Formatting.distance(step.distanceMeters, units),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = contentColor,
+                )
+                if (level.isNotable) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(Modifier.size(7.dp).background(colorFor(level), CircleShape))
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        level.label.lowercase(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colorFor(level),
+                    )
+                }
+                // Cameras on this leg matter more than the distance does, so they are not
+                // buried behind a tap.
+                if (step.detectorCount > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        Icons.Rounded.Videocam,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = ShadowColors.Watched,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        step.detectorCount.toString(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Watched,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The worst band anywhere on the stretch this instruction covers. */
+private fun congestionOn(step: RouteStep, spans: List<CongestionSpan>): CongestionLevel {
+    val from = step.startAlongRouteMeters
+    val to = from + step.distanceMeters
+    return spans
+        .filter { it.fromMeters < to && it.toMeters > from }
+        .maxByOrNull { it.level.ordinal }
+        ?.level
+        ?: CongestionLevel.FREE
+}
+
+/** The tab that brings the directions list back, and the button that opens it. */
+@Composable
+fun DirectionsToggle(open: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            Modifier.clickable(onClick = onToggle).padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.FormatListNumbered,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (open) "Hide steps" else "All steps",
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
+    }
 }
 
 @Composable

@@ -3,6 +3,8 @@ package dev.shadowgps.core.routing
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.traffic.CongestionLevel
+import dev.shadowgps.core.traffic.CongestionSpan
 import dev.shadowgps.core.traffic.TrafficModel
 import kotlinx.serialization.Serializable
 
@@ -117,7 +119,17 @@ data class Route(
      * without that comparison is just an unexplained number.
      */
     val freeFlowSeconds: Double = durationSeconds,
+    /** Where along the route congestion is expected, for colouring the line. */
+    val congestionSpans: List<CongestionSpan> = emptyList(),
 ) {
+    /** The worst band anywhere on the route. */
+    val heaviestCongestion: CongestionLevel
+        get() = congestionSpans.maxByOrNull { it.level.ordinal }?.level ?: CongestionLevel.FREE
+
+    /** How much of the route is expected to be moving badly. */
+    val metersInTraffic: Double
+        get() = congestionSpans.filter { it.level.isNotable }.sumOf { it.lengthMeters }
+
     /** Time the congestion model expects this route to lose. */
     val trafficDelaySeconds: Double get() = (durationSeconds - freeFlowSeconds).coerceAtLeast(0.0)
 

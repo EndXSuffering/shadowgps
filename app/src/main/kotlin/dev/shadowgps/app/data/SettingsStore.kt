@@ -45,6 +45,13 @@ data class AppSettings(
      * what you can see out of the windscreen should be dismissable.
      */
     val allowForTraffic: Boolean = true,
+    /**
+     * Prefer calmer roads even when they are not quicker.
+     *
+     * Distinct from [allowForTraffic], which only makes the estimate honest. This says the
+     * driver would rather keep moving than shave a minute, and it costs time by design.
+     */
+    val avoidHeavyTraffic: Boolean = false,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -85,6 +92,7 @@ class SettingsStore(context: Context) {
             showAllDetectors = prefs.getBoolean(KEY_SHOW_ALL, defaults.showAllDetectors),
             mapTheme = MapTheme.fromName(prefs.getString(KEY_MAP_THEME, null)),
             allowForTraffic = prefs.getBoolean(KEY_TRAFFIC, defaults.allowForTraffic),
+            avoidHeavyTraffic = prefs.getBoolean(KEY_AVOID_TRAFFIC, defaults.avoidHeavyTraffic),
         )
     }
 
@@ -98,6 +106,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_SHOW_ALL, settings.showAllDetectors)
             .putString(KEY_MAP_THEME, settings.mapTheme.name)
             .putBoolean(KEY_TRAFFIC, settings.allowForTraffic)
+            .putBoolean(KEY_AVOID_TRAFFIC, settings.avoidHeavyTraffic)
             .apply()
     }
 
@@ -110,5 +119,6 @@ class SettingsStore(context: Context) {
         const val KEY_SHOW_ALL = "show_all_detectors"
         const val KEY_MAP_THEME = "map_theme"
         const val KEY_TRAFFIC = "allow_for_traffic"
+        const val KEY_AVOID_TRAFFIC = "avoid_heavy_traffic"
     }
 }

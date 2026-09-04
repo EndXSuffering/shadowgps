@@ -6,6 +6,9 @@ import dev.shadowgps.core.graph.GraphBuilder
 import dev.shadowgps.core.osm.OsmElement
 import dev.shadowgps.core.routing.PrivacyProfile
 import dev.shadowgps.core.routing.RoutePlanner
+import dev.shadowgps.core.routing.RoutingOptions
+import dev.shadowgps.core.traffic.CONGESTION_AVERSION
+import dev.shadowgps.core.traffic.CongestionLevel
 import dev.shadowgps.core.traffic.DayType
 import dev.shadowgps.core.traffic.TrafficModel
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -251,6 +254,86 @@ class TrafficModelTest {
         assertEquals(model, plan.traffic)
         assertEquals("Peak traffic", plan.traffic.label)
         assertEquals(plan.routes.single(), plan.quickest)
+    }
+
+    @Test
+    fun `a busy route says where it is busy`() {
+        val graph = GraphBuilder.build(twoRoutesTown())
+        val start = LatLon(35.99, -78.90)
+        val end = destinationPoint(start, 90.0, 2_000.0)
+
+        val route = RoutePlanner(graph, emptyList(), traffic = weekday(17, 30))
+            .plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+
+        assertTrue(route.congestionSpans.isNotEmpty(), "a peak route should be banded")
+        assertEquals(0.0, route.congestionSpans.first().fromMeters)
+        // The spans are what gets drawn over the line, so they have to cover it.
+        assertEquals(route.distanceMeters, route.congestionSpans.last().toMeters, 1.0)
+        assertTrue(route.heaviestCongestion.isNotable)
+        assertTrue(route.metersInTraffic > 0.0)
+    }
+
+    @Test
+    fun `an empty road is not painted as traffic`() {
+        val graph = GraphBuilder.build(twoRoutesTown())
+        val start = LatLon(35.99, -78.90)
+        val end = destinationPoint(start, 90.0, 2_000.0)
+
+        val route = RoutePlanner(graph, emptyList(), traffic = TrafficModel.FREE_FLOW)
+            .plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+
+        assertEquals(CongestionLevel.FREE, route.heaviestCongestion)
+        assertEquals(0.0, route.metersInTraffic)
+    }
+
+    @Test
+    fun `avoiding heavy traffic takes the calmer road`() {
+        val graph = GraphBuilder.build(twoRoutesTown())
+        val start = LatLon(35.99, -78.90)
+        val end = destinationPoint(start, 90.0, 2_000.0)
+
+        // Deliberately not the peak. At the peak the queueing already costs more than the
+        // detour and the quiet road wins on time alone; the setting is only interesting in
+        // the band where the busy road is still quicker and the driver wants out anyway.
+        val conditions = weekday(11, 0)
+
+        val quickest = RoutePlanner(graph, emptyList(), traffic = conditions)
+            .plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+
+        val calmer = RoutePlanner(
+            graph,
+            emptyList(),
+            options = RoutingOptions(congestionAversion = CONGESTION_AVERSION),
+            traffic = conditions,
+        ).plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+
+        assertEquals("Signal Street", quickest.steps.first().roadName, "the direct road is still quicker")
+        assertEquals("Quiet Way", calmer.steps.first().roadName, "avoiding traffic should take the detour")
+        // And it costs what it says on the tin: the calmer way really is the slower way.
+        assertTrue(
+            calmer.durationSeconds > quickest.durationSeconds,
+            "the detour is meant to cost time: ${calmer.durationSeconds} vs ${quickest.durationSeconds}",
+        )
+    }
+
+    @Test
+    fun `avoiding traffic changes nothing on empty roads`() {
+        // Nothing to avoid at 3am, so the setting must not quietly send the driver the long
+        // way round for no reason at all.
+        val graph = GraphBuilder.build(twoRoutesTown())
+        val start = LatLon(35.99, -78.90)
+        val end = destinationPoint(start, 90.0, 2_000.0)
+
+        val plain = RoutePlanner(graph, emptyList(), traffic = weekday(3))
+            .plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+        val averse = RoutePlanner(
+            graph,
+            emptyList(),
+            options = RoutingOptions(congestionAversion = CONGESTION_AVERSION),
+            traffic = weekday(3),
+        ).plan(start, end, listOf(PrivacyProfile.FASTEST)).routes.single()
+
+        assertEquals(plain.geometry, averse.geometry)
     }
 
     @Test

@@ -38,7 +38,9 @@ import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteFailure
 import dev.shadowgps.core.routing.RoutePlanner
+import dev.shadowgps.core.routing.RoutingOptions
 import dev.shadowgps.core.routing.SnapRadius
+import dev.shadowgps.core.traffic.CONGESTION_AVERSION
 import dev.shadowgps.core.traffic.TrafficModel
 import java.time.LocalDateTime
 import kotlinx.coroutines.Dispatchers
@@ -366,6 +368,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         graph = loaded.graph,
                         detectors = loaded.detectors,
                         settings = _state.value.settings.toAvoidanceSettings(),
+                        options = routingOptions(),
                         traffic = currentTraffic(),
                     )
                     planner = builtPlanner
@@ -459,6 +462,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Read at planning time rather than held, so a trip planned at ten to five and one
      * planned at ten past get the conditions each actually faces.
      */
+    /** Search settings, including whether busy roads are worth a detour in their own right. */
+    private fun routingOptions(): RoutingOptions = RoutingOptions(
+        congestionAversion = if (_state.value.settings.avoidHeavyTraffic) CONGESTION_AVERSION else 0.0,
+    )
+
     private fun currentTraffic(): TrafficModel =
         if (_state.value.settings.allowForTraffic) {
             TrafficModel.at(LocalDateTime.now())
@@ -698,6 +706,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         graph = reloaded.graph,
                         detectors = reloaded.detectors,
                         settings = _state.value.settings.toAvoidanceSettings(),
+                        options = routingOptions(),
                         traffic = currentTraffic(),
                     ).also { planner = it }
                 } ?: return@launch
@@ -837,8 +846,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         settingsStore.update(transform)
         val after = settingsStore.settings.value
 
-        // Changing what counts as worth avoiding invalidates any route already on screen.
-        if (after.avoidedKinds != before.avoidedKinds && _state.value.phase == Phase.CHOOSING) {
+        // Changing what counts as worth avoiding — cameras or congestion — invalidates any
+        // route already on screen, and leaving a stale one there would misrepresent the
+        // setting the driver has just changed.
+        val routingChanged = after.avoidedKinds != before.avoidedKinds ||
+            after.avoidHeavyTraffic != before.avoidHeavyTraffic ||
+            after.allowForTraffic != before.allowForTraffic
+        if (routingChanged && _state.value.phase == Phase.CHOOSING) {
             planRoutes()
         }
     }

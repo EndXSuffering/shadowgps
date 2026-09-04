@@ -16,6 +16,15 @@ data class RoutingOptions(
     val uTurnPenaltySeconds: Double = 90.0,
     /** Safety valve so a disconnected or enormous graph cannot spin forever. */
     val maxExpandedStates: Int = 2_000_000,
+    /**
+     * How much extra to charge for time lost to congestion, on top of losing it.
+     *
+     * Zero routes purely on expected arrival time, which already avoids traffic as far as
+     * that is worth doing. Above zero the driver is saying they would rather keep moving
+     * than arrive fractionally sooner — a calmer road for a slightly longer trip — so the
+     * modelled delay is weighted against the route beyond the seconds it actually costs.
+     */
+    val congestionAversion: Double = 0.0,
 )
 
 /**
@@ -206,7 +215,10 @@ class Router(
             }
 
             val junction = edge.toNode
-            val junctionDelay = traffic.nodeSeconds[junction]
+            // Queueing at a junction is charged twice for a traffic-averse driver, for the
+            // same reason a congested link is: they have said they would rather keep moving.
+            val junctionDelay = traffic.nodeSeconds[junction] +
+                options.congestionAversion * traffic.nodeDelaySeconds[junction]
 
             graph.forEachOutgoing(junction) { nextIndex ->
                 val next = graph.edges[nextIndex]
@@ -276,7 +288,9 @@ class Router(
 
     /** Cost of traversing a whole edge. */
     private fun fullCost(edgeIndex: Int, lambdaSeconds: Double): Double =
-        traffic.edgeSeconds[edgeIndex] + lambdaSeconds * exposure.edgeWeight[edgeIndex]
+        traffic.edgeSeconds[edgeIndex] +
+            options.congestionAversion * traffic.edgeDelaySeconds[edgeIndex] +
+            lambdaSeconds * exposure.edgeWeight[edgeIndex]
 
     /**
      * Cost of traversing part of an edge.
@@ -289,7 +303,8 @@ class Router(
         val edge = graph.edges[edgeIndex]
         val span = (toMeters - fromMeters).coerceAtLeast(0.0)
         val fraction = if (edge.lengthMeters <= 0.0) 0.0 else (span / edge.lengthMeters).coerceIn(0.0, 1.0)
-        val seconds = traffic.edgeSeconds[edgeIndex] * fraction
+        val seconds = (traffic.edgeSeconds[edgeIndex] +
+            options.congestionAversion * traffic.edgeDelaySeconds[edgeIndex]) * fraction
 
         if (lambdaSeconds <= 0.0) return seconds
 

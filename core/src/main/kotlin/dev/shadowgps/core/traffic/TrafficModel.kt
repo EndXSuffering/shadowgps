@@ -5,6 +5,9 @@ import kotlinx.serialization.Serializable
 import java.time.DayOfWeek
 import java.time.LocalDateTime
 
+/** Extra weight on modelled delay when the driver has asked to avoid busy roads. */
+const val CONGESTION_AVERSION: Double = 1.75
+
 /** How a day's traffic is shaped. Commuting is a weekday phenomenon. */
 enum class DayType {
     WEEKDAY,

@@ -8,6 +8,8 @@ import dev.shadowgps.core.geo.coordsToList
 import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.geo.sliceCoords
 import dev.shadowgps.core.graph.RoadGraph
+import dev.shadowgps.core.traffic.CongestionLevel
+import dev.shadowgps.core.traffic.CongestionSpans
 import dev.shadowgps.core.traffic.TrafficModel
 import dev.shadowgps.core.traffic.TrafficTable
 
@@ -127,6 +129,7 @@ class RoutePlanner(
         val durations = DoubleArray(count)
         val freeFlowDurations = DoubleArray(count)
         val startOffsets = DoubleArray(count)
+        val congestion = ArrayList<CongestionLevel>(count)
 
         val encountersByDetector = LinkedHashMap<String, DetectorEncounter>()
         var cumulative = 0.0
@@ -156,6 +159,7 @@ class RoutePlanner(
             }
             durations[position] = seconds
             freeFlowDurations[position] = freeFlow
+            congestion.add(trafficTable.levelFor(edgeIndex))
 
             for (hit in exposureIndex.hits(edgeIndex)) {
                 if (hit.alongMeters < from || hit.alongMeters > to) continue
@@ -201,6 +205,7 @@ class RoutePlanner(
             steps = withDetectorCounts(steps, encounters),
             exposure = exposure,
             freeFlowSeconds = freeFlowDurations.sum(),
+            congestionSpans = CongestionSpans.build(distances, congestion),
         )
     }
 

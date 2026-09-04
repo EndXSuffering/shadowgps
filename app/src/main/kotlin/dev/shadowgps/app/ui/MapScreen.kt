@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -53,6 +54,9 @@ fun MapScreen(viewModel: MainViewModel) {
     var showSettings by remember { mutableStateOf(false) }
     var tappedDetector by remember { mutableStateOf<Detector?>(null) }
     var pendingPin by remember { mutableStateOf<LatLon?>(null) }
+    // Hidden by default: the map is the thing, and the list is for when a driver wants to
+    // check a turn that is still several manoeuvres away.
+    var showDirections by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -88,6 +92,23 @@ fun MapScreen(viewModel: MainViewModel) {
             onDetectorTapped = { detector -> tappedDetector = detector },
             onViewportChanged = viewModel::loadDetectorsFor,
         )
+
+        // ------------------------------------------------------------- directions
+        state.selectedRoute?.let { route ->
+            if (showDirections) {
+                DirectionsPanel(
+                    steps = route.steps,
+                    currentStepIndex = state.navigation?.currentStepIndex,
+                    congestionSpans = route.congestionSpans,
+                    units = state.settings.units,
+                    onClose = { showDirections = false },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxWidth(0.6f)
+                        .heightIn(max = 340.dp),
+                )
+            }
+        }
 
         // ------------------------------------------------------------- top
         Column(
@@ -195,6 +216,14 @@ fun MapScreen(viewModel: MainViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+
+            if (state.selectedRoute != null) {
+                DirectionsToggle(
+                    open = showDirections,
+                    onToggle = { showDirections = !showDirections },
+                    modifier = Modifier.padding(end = 16.dp, bottom = 10.dp),
                 )
             }
 
