@@ -1,6 +1,7 @@
 package dev.shadowgps.app.ui
 
 import android.Manifest
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
@@ -57,10 +59,41 @@ fun MapScreen(viewModel: MainViewModel) {
     // Hidden by default: the map is the thing, and the list is for when a driver wants to
     // check a turn that is still several manoeuvres away.
     var showDirections by remember { mutableStateOf(false) }
+    var confirmStop by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { viewModel.refreshPermissionState() }
+
+    // Back undoes the last thing that happened, one step at a time. There was no handler at
+    // all before, so the gesture went straight to the system and closed ShadowGPS outright —
+    // mid-download, mid-route-choice and mid-drive alike, with everything chosen so far lost.
+    // Now it only falls through to leaving the app once there is genuinely nothing left to
+    // undo, and leaving mid-drive asks first, because that is not a thing to do by accident
+    // on a gesture that starts at the edge of the screen.
+    val canGoBack = showSettings ||
+        pendingPin != null ||
+        tappedDetector != null ||
+        showDirections ||
+        state.phase != Phase.BROWSING ||
+        state.query.isNotEmpty() ||
+        state.destination != null ||
+        state.origin != null
+
+    BackHandler(enabled = canGoBack) {
+        when {
+            showSettings -> showSettings = false
+            pendingPin != null -> pendingPin = null
+            tappedDetector != null -> tappedDetector = null
+            showDirections -> showDirections = false
+            state.overview -> viewModel.setOverview(false)
+            state.phase == Phase.NAVIGATING -> confirmStop = true
+            state.phase == Phase.WORKING -> viewModel.cancelWork()
+            state.phase == Phase.CHOOSING -> viewModel.clearDestination()
+            state.query.isNotEmpty() -> viewModel.clearSearch()
+            else -> viewModel.resetTrip()
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!state.locationGranted) {
@@ -155,15 +188,15 @@ fun MapScreen(viewModel: MainViewModel) {
                 )
             }
 
-            if (state.phase != Phase.NAVIGATING) {
-                state.origin?.let { origin ->
-                    Spacer(Modifier.height(8.dp))
-                    OriginChip(
-                        name = origin.shortName,
-                        onUseCurrentLocation = viewModel::useCurrentLocationAsOrigin,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+            if (state.phase != Phase.NAVIGATING && (state.origin != null || state.destination != null)) {
+                Spacer(Modifier.height(8.dp))
+                TripChip(
+                    originName = state.origin?.shortName,
+                    destinationName = state.destination?.shortName,
+                    onUseCurrentLocation = viewModel::useCurrentLocationAsOrigin,
+                    onStartOver = viewModel::resetTrip,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
 
             state.busyMessage?.let { message ->
@@ -172,14 +205,24 @@ fun MapScreen(viewModel: MainViewModel) {
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surface,
                     tonalElevation = 3.dp,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(
-                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(12.dp))
-                        Text(message, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        // Downloading a large area on a poor connection can take minutes,
+                        // and until this existed the only way out of it was to kill the app.
+                        TextButton(onClick = viewModel::cancelWork) { Text("Cancel") }
                     }
                 }
             }
@@ -262,6 +305,7 @@ fun MapScreen(viewModel: MainViewModel) {
                         traffic = state.traffic,
                         onSelect = viewModel::selectRoute,
                         onStart = viewModel::startNavigation,
+                        onStartOver = viewModel::resetTrip,
                         onDismiss = viewModel::clearDestination,
                         modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
                     )
@@ -288,6 +332,16 @@ fun MapScreen(viewModel: MainViewModel) {
         }
     }
 
+    if (confirmStop) {
+        StopNavigationDialog(
+            onConfirm = {
+                confirmStop = false
+                viewModel.stopNavigation()
+            },
+            onDismiss = { confirmStop = false },
+        )
+    }
+
     if (showSettings) {
         SettingsSheet(
             settings = state.settings,
@@ -300,6 +354,7 @@ fun MapScreen(viewModel: MainViewModel) {
             onSaveCurrentArea = { viewModel.saveCurrentViewport() },
             onRefreshRegion = viewModel::refreshRegion,
             onDeleteRegion = viewModel::deleteRegion,
+            onCancelDownload = viewModel::cancelRegionDownload,
             onDismiss = { showSettings = false },
         )
     }
@@ -345,9 +400,23 @@ private fun PinChoiceCard(
     }
 }
 
-/** Shows a manually chosen start point, with the way back to the live position. */
+/**
+ * The trip as it currently stands, and the way out of it.
+ *
+ * Both ends are shown together because that is the question being asked — "is this the
+ * journey you meant?" — and either can be wrong. "Start over" clears the lot in one press;
+ * before it existed, undoing a mis-dropped pin meant working out which control had set it,
+ * and a start pin in particular could end up stranded on the map with nothing obvious to
+ * clear it.
+ */
 @Composable
-private fun OriginChip(name: String, onUseCurrentLocation: () -> Unit, modifier: Modifier = Modifier) {
+private fun TripChip(
+    originName: String?,
+    destinationName: String?,
+    onUseCurrentLocation: () -> Unit,
+    onStartOver: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(12.dp),
@@ -355,19 +424,51 @@ private fun OriginChip(name: String, onUseCurrentLocation: () -> Unit, modifier:
         tonalElevation = 3.dp,
     ) {
         Row(
-            Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            Modifier.padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                "Starting from $name",
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onUseCurrentLocation) { Text("Use my location") }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "From ${originName ?: "my location"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                destinationName?.let {
+                    Text(
+                        "To $it",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Only offered when the start is a pin, since otherwise it is already the
+            // live position and the button would do nothing.
+            if (originName != null) {
+                TextButton(onClick = onUseCurrentLocation) { Text("My location") }
+            }
+            TextButton(onClick = onStartOver) { Text("Start over") }
         }
     }
+}
+
+/**
+ * Confirms leaving a trip in progress.
+ *
+ * Back is a gesture from the edge of the screen, which is exactly where a hand lands when
+ * reaching for a phone in a cradle. Losing guidance to that is worse than one extra tap.
+ */
+@Composable
+private fun StopNavigationDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Stop navigating?") },
+        text = { Text("Guidance will end and you will go back to the map.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Stop") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Keep going") } },
+    )
 }
 
 /** Details for a camera the user tapped on the map. */

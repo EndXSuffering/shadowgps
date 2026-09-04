@@ -296,6 +296,8 @@ fun RouteChooser(
     traffic: TrafficModel,
     onSelect: (Int) -> Unit,
     onStart: () -> Unit,
+    /** Clears both ends of the trip, for when the wrong one was picked. */
+    onStartOver: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -352,14 +354,25 @@ fun RouteChooser(
                 Spacer(Modifier.height(8.dp))
             }
 
-            Button(
-                onClick = onStart,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                Icon(Icons.Rounded.NearMe, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Start", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Sits beside Start rather than in the header, because this is the moment
+                // the driver is looking at the trip and realising one end is wrong.
+                OutlinedButton(
+                    onClick = onStartOver,
+                    modifier = Modifier.height(52.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Text("Start over")
+                }
+                Button(
+                    onClick = onStart,
+                    modifier = Modifier.weight(1f).height(52.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Icon(Icons.Rounded.NearMe, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Start", style = MaterialTheme.typography.titleMedium)
+                }
             }
         }
     }
@@ -803,6 +816,7 @@ fun SettingsSheet(
     onSaveCurrentArea: () -> Unit,
     onRefreshRegion: (SavedRegion) -> Unit,
     onDeleteRegion: (SavedRegion) -> Unit,
+    onCancelDownload: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -822,6 +836,7 @@ fun SettingsSheet(
                 onSaveCurrentArea = onSaveCurrentArea,
                 onRefresh = onRefreshRegion,
                 onDelete = onDeleteRegion,
+                onCancelDownload = onCancelDownload,
             )
 
             Spacer(Modifier.height(16.dp))
@@ -1001,6 +1016,7 @@ private fun OfflineMapsSection(
     onSaveCurrentArea: () -> Unit,
     onRefresh: (SavedRegion) -> Unit,
     onDelete: (SavedRegion) -> Unit,
+    onCancelDownload: () -> Unit,
 ) {
     Text("Offline maps", style = MaterialTheme.typography.titleMedium)
     Text(
@@ -1017,10 +1033,13 @@ private fun OfflineMapsSection(
             color = MaterialTheme.colorScheme.surfaceVariant,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(14.dp))
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(download.message, style = MaterialTheme.typography.bodyLarge)
                     Text(
                         "${download.areaKm2.toInt()} km² · this can take a few minutes",
@@ -1028,6 +1047,8 @@ private fun OfflineMapsSection(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // "A few minutes" is a promise worth being able to withdraw from.
+                TextButton(onClick = onCancelDownload) { Text("Cancel") }
             }
         }
         Spacer(Modifier.height(12.dp))

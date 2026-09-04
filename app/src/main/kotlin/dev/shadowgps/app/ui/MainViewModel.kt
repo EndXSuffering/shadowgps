@@ -160,6 +160,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var locationJob: Job? = null
     private var searchJob: Job? = null
+
+    // Held so the user can call them off. Downloading map data for a long trip on a poor
+    // connection is the slowest thing this app does, and until these were tracked there was
+    // no way to stop it short of killing the app.
+    private var planJob: Job? = null
+    private var regionJob: Job? = null
+
+    /**
+     * Which attempt at planning is the live one.
+     *
+     * Cancelling a coroutine does not stop the blocking download inside it mid-call, so its
+     * progress callbacks can still fire afterwards. Without this they would put the "…"
+     * message back up over a map the user had just got back, leaving a spinner nothing could
+     * clear. Every callback checks it is still the current attempt before saying anything.
+     */
+    private var planGeneration = 0
+
     private var lastRerouteAt = 0L
 
     init {
@@ -319,7 +336,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Goes back to routing from wherever the device thinks it is. */
     fun useCurrentLocationAsOrigin() = setOrigin(null)
 
+    /** Ends the current planning attempt and makes anything it says from now on ignorable. */
+    private fun stopPlanning() {
+        planJob?.cancel()
+        planJob = null
+        planGeneration++
+    }
+
     fun clearDestination() {
+        stopPlanning()
         joinWatcher = null
         _state.update {
             it.copy(
@@ -327,8 +352,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 routes = emptyList(),
                 navigation = null,
                 phase = Phase.BROWSING,
+                busyMessage = null,
                 provisionalStart = null,
                 awaitingJoin = false,
+            )
+        }
+    }
+
+    /**
+     * Abandons a download or a search in progress and gives the map back.
+     *
+     * The origin and destination are deliberately kept: the usual reason to stop a slow
+     * download is to try again in a moment, not to throw the trip away, and re-entering both
+     * ends to retry would be its own punishment. Use [resetTrip] to throw it away.
+     *
+     * A request already on the wire is left to finish into the disk cache rather than being
+     * torn down — it costs nothing to let it land, and a retry is then instant. What stops
+     * immediately is everything the user can see.
+     */
+    fun cancelWork() {
+        stopPlanning()
+        searchJob?.cancel()
+        _state.update {
+            it.copy(
+                // Falling back to any routes already on screen rather than to a blank map,
+                // so cancelling a re-plan leaves the driver where they were.
+                phase = if (it.routes.isEmpty()) Phase.BROWSING else Phase.CHOOSING,
+                busyMessage = null,
+                searching = false,
+            )
+        }
+    }
+
+    /** Stops a region download without touching anything already saved. */
+    fun cancelRegionDownload() {
+        regionJob?.cancel()
+        regionJob = null
+        _state.update { it.copy(regionDownload = null) }
+    }
+
+    /**
+     * Throws the whole trip away and goes back to a bare map.
+     *
+     * The escape hatch for a start or a destination set by mistake. Undoing one of those
+     * piecemeal meant knowing which control had set it — the origin chip, the search field's
+     * cross, the route sheet's close button — and none of them touched the other end, so a
+     * long-press in the wrong place could leave a start pin stuck on the map with no obvious
+     * way to be rid of it. This clears both ends, the routes, the search and any work in
+     * flight, in one action.
+     */
+    fun resetTrip() {
+        stopPlanning()
+        searchJob?.cancel()
+
+        if (_state.value.phase == Phase.NAVIGATING) {
+            speaker.stop()
+            NavigationService.stop(getApplication())
+        }
+        engine = null
+        joinWatcher = null
+
+        _state.update {
+            it.copy(
+                phase = Phase.BROWSING,
+                busyMessage = null,
+                error = null,
+                origin = null,
+                destination = null,
+                routes = emptyList(),
+                selectedRouteIndex = 0,
+                navigation = null,
+                isRerouting = false,
+                provisionalStart = null,
+                awaitingJoin = false,
+                overview = false,
+                query = "",
+                suggestions = emptyList(),
+                searching = false,
             )
         }
     }
@@ -345,13 +445,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (to == null) return
 
-        viewModelScope.launch {
+        // A second attempt supersedes the first; two downloads racing to set the same
+        // state is how a cancelled plan comes back from the dead.
+        stopPlanning()
+        val generation = planGeneration
+        planJob = viewModelScope.launch {
             // Deliberately neutral until the repository says which it is doing: claiming a
             // download while opening a saved map is exactly the bug this replaced.
             _state.update { it.copy(phase = Phase.WORKING, busyMessage = "Preparing the map…", error = null) }
             try {
                 val loaded = withContext(Dispatchers.IO) {
                     repository.loadFor(from, to) { stage ->
+                        if (generation != planGeneration) return@loadFor
                         val message = when (stage) {
                             MapDataRepository.LoadStage.OPENING_SAVED -> "Opening your saved map…"
                             MapDataRepository.LoadStage.DOWNLOADING -> "Downloading map data…"
@@ -780,7 +885,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveRegion(box: BoundingBox, name: String, id: String = newRegionId()) {
         if (_state.value.regionDownload != null) return
 
-        viewModelScope.launch {
+        regionJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     regionDownload = RegionDownloadState(name, MapDataRepository.RegionProgress.ROADS, box.areaKm2),
