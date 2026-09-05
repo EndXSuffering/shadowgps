@@ -29,31 +29,76 @@ data class AddressParts(
  */
 object AddressLabel {
 
-    /** House number and street, in the order people say them. */
-    fun street(parts: AddressParts): String? =
-        listOfNotNull(parts.houseNumber, parts.road)
-            .joinToString(" ")
-            .trim()
-            .takeIf { it.isNotBlank() }
+    /**
+     * House number and street, in the order people say them.
+     *
+     * Null without a street, deliberately: a house number on its own is not an address, and
+     * letting one stand as a title is the exact failure this whole file exists to prevent.
+     */
+    fun street(parts: AddressParts): String? {
+        val road = parts.road?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return listOfNotNull(houseNumber(parts), road).joinToString(" ")
+    }
+
+    /**
+     * The house number, from the structured field or recovered from the one-line address.
+     *
+     * Nominatim does not always fill `house_number` even when its own display name leads
+     * with the number, and a result offered as "Elm Street" to somebody who typed "500 Elm
+     * Street" is not the address they asked for — it is the whole road.
+     */
+    private fun houseNumber(parts: AddressParts): String? {
+        parts.houseNumber?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        val road = parts.road ?: return null
+        val head = parts.displayName.substringBefore(",").trim()
+        if (head.isEmpty() || head.length > MAX_HOUSE_NUMBER_LENGTH || head.none(Char::isDigit)) return null
+
+        // Only when the very next part is the street this result sits on. Otherwise the
+        // leading chunk is a name, a postcode, or something else entirely.
+        val next = parts.displayName.substringAfter(",", "").substringBefore(",").trim()
+        return head.takeIf { next.equals(road, ignoreCase = true) }
+    }
+
+    /** Longer than this and the leading chunk of an address is not a house number. */
+    private const val MAX_HOUSE_NUMBER_LENGTH = 10
 
     /**
      * The first line.
      *
      * A business or landmark is named after itself — that is what was typed and what will be
-     * recognised on arrival. Everything else is named after its street. A `name` that is
-     * really the house number is not a name at all, which is what the letter test catches.
+     * recognised on arrival. Everything else is named after its street, house number and
+     * all. Two kinds of `name` are not names at all and have to be turned down, because
+     * accepting either loses the number: the house number itself, which is what Nominatim
+     * calls an address point, and the street name, which is what it calls a house sitting on
+     * a road. Both would leave the driver picking between several identical-looking streets.
      */
     fun title(parts: AddressParts): String {
         val poi = parts.name?.trim()?.takeIf { candidate ->
             candidate.isNotEmpty() &&
                 candidate.any(Char::isLetter) &&
-                candidate != parts.houseNumber
+                candidate != parts.houseNumber &&
+                !candidate.equals(parts.road, ignoreCase = true)
         }
         return when {
             poi != null -> poi
-            else -> street(parts)
-                ?: parts.displayName.substringBefore(",").trim().ifBlank { parts.displayName }
+            else -> street(parts) ?: fromDisplayName(parts.displayName)
         }
+    }
+
+    /**
+     * Last resort, when the geocoder returned nothing structured at all.
+     *
+     * Runs on to the second part when the first is only a number: that is where the street
+     * name will be, and stopping at the first comma is how a whole result came to be called
+     * "500" in the first place.
+     */
+    private fun fromDisplayName(displayName: String): String {
+        val chunks = displayName.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (chunks.isEmpty()) return displayName
+        val head = chunks.first()
+        if (head.any(Char::isLetter) || chunks.size < 2) return head
+        return "$head ${chunks[1]}"
     }
 
     /**
