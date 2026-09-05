@@ -6,15 +6,12 @@ import dev.shadowgps.core.search.AddressLabel
 import dev.shadowgps.core.search.AddressParts
 import dev.shadowgps.core.search.AddressQuery
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.io.IOException
 
 /** Somewhere the user can route to. */
 @Serializable
@@ -50,6 +47,14 @@ data class Place(
     val houseNumber: String? = null,
     /** Kept apart from the address line so a typed postcode can be matched against it. */
     val postcode: String? = null,
+    /**
+     * The position is somewhere on the right block rather than on the building.
+     *
+     * True of address-range data, which interpolates between the numbers at each end of a
+     * street. Worth saying out loud: it is the difference between arriving at the door and
+     * arriving near it, and the driver should not have to discover that on the way.
+     */
+    val approximate: Boolean = false,
 ) {
     /** Whether this pins a building, rather than a road or an area. */
     val isExactAddress: Boolean get() = houseNumber != null
@@ -164,11 +169,24 @@ private data class NominatimResult(
 }
 
 /**
- * Address lookup through Nominatim, OpenStreetMap's geocoder.
+ * Finding somewhere to drive to.
  *
- * Nominatim's usage policy caps this at roughly one request a second and requires an
- * identifying User-Agent, which is why search is debounced in the UI rather than fired on
- * every keystroke.
+ * Three sources, each covering the others' blind spots, none of them needing an account or
+ * a key — which matters, because a key means a billing identity and a billing identity means
+ * every search a driver makes is attributable to a person. Every one of these is anonymous
+ * in the same way the map tiles are.
+ *
+ *  - The **Census** knows every street address in the United States, including the
+ *    route-numbered ones OpenStreetMap has no house number for, and nothing whatsoever about
+ *    what any business is called.
+ *  - **Photon** knows what OpenStreetMap knows, through a search index built for people
+ *    typing rather than for exact matching, so it forgives abbreviations and typos.
+ *  - **Nominatim** is the backstop, and the only one of the three that does reverse
+ *    geocoding well, which is what turns a long-press on the map into an address.
+ *
+ * Nominatim's usage policy caps requests at roughly one a second and requires an identifying
+ * User-Agent, which is why search is debounced in the UI rather than fired on every
+ * keystroke.
  */
 class GeocodingClient(
     private val http: OkHttpClient,
@@ -177,45 +195,45 @@ class GeocodingClient(
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    private val cachedHttp = HttpCache(http, cache)
+    private val census = CensusGeocoder(cachedHttp)
+    private val photon = PhotonGeocoder(cachedHttp)
+
     /**
      * Looks up an address or a place.
      *
-     * Two passes, because free-text matching has a specific and common failure: on a US
-     * address built round a route number — "8227 TX-151, San Antonio, TX 78245" — it decides
-     * the whole line is the highway and returns stretches of road rather than the building.
-     * Those come back with no house number, several of them, miles apart and reading
-     * identically. When that happens and the query clearly named a building, the address is
-     * broken into fields and asked again; a geocoder told exactly which part is the street
-     * reaches house-number data that free-text matching walks straight past.
+     * The order is chosen by what the query looks like, because the sources are good at
+     * different things and asking all three every time would be slow and rude.
      *
-     * The second request only ever happens on that failure, so an ordinary search still
-     * costs exactly one.
+     * A query that names a building — a house number with a street after it — goes to the
+     * Census first, since that is the one lookup that can answer it authoritatively. An
+     * exact match ends the search there. Anything else, and anything the Census could not
+     * place, goes to Photon, which is the better of the two OpenStreetMap front ends at
+     * matching what a person actually typed. Nominatim answers when Photon finds nothing.
+     *
+     * Each step only runs when the one before it came up short, so an ordinary search still
+     * costs a single request.
      */
     suspend fun search(query: String, near: LatLon? = null, limit: Int = 10): List<Place> =
         withContext(Dispatchers.IO) {
             if (query.isBlank()) return@withContext emptyList()
             val split = AddressQuery.split(query)
+            val searchable = split.searchable
 
-            val free = fetchPlaces(freeTextUrl(split.searchable, near, limit), split.unit)
-            if (free.any { it.isExactAddress } || !AddressQuery.namesABuilding(split.searchable)) {
-                return@withContext rankForDriver(free, near, split.searchable)
+            if (AddressQuery.namesABuilding(searchable)) {
+                val exact = census.search(searchable, limit).map { it.copy(unit = split.unit) }
+                if (exact.isNotEmpty()) return@withContext rankForDriver(exact, near, searchable)
             }
 
-            val fields = AddressQuery.structure(split.searchable)
-                ?: return@withContext rankForDriver(free, near, split.searchable)
+            val fromPhoton = photon.search(searchable, near, limit, split.unit)
+            if (fromPhoton.isNotEmpty()) return@withContext rankForDriver(fromPhoton, near, searchable)
 
-            // Nominatim asks for no more than a request a second, and this one follows hard
-            // on the heels of the last.
-            delay(SECOND_PASS_DELAY_MILLIS)
-            val exact = fetchPlaces(structuredUrl(fields, limit), split.unit)
-
-            // Only worth having if it did what the first pass could not.
-            val best = if (exact.any { it.isExactAddress }) exact else free
-            rankForDriver(best, near, split.searchable)
+            val fromNominatim = fetchPlaces(freeTextUrl(searchable, near, limit), split.unit)
+            rankForDriver(fromNominatim, near, searchable)
         }
 
     private fun fetchPlaces(url: String, unit: String?): List<Place> {
-        val body = fetchCached(url, SEARCH_CACHE_MILLIS) ?: return emptyList()
+        val body = cachedHttp.get(url, SEARCH_CACHE_MILLIS) ?: return emptyList()
         return runCatching { json.decodeFromString<List<NominatimResult>>(body) }
             .getOrDefault(emptyList())
             .mapNotNull { it.toPlace(unit) }
@@ -229,14 +247,6 @@ class GeocodingClient(
                 val box = dev.shadowgps.core.geo.BoundingBox.around(near, 40_000.0)
                 addQueryParameter("viewbox", "${box.west},${box.north},${box.east},${box.south}")
             }
-        }
-
-    private fun structuredUrl(fields: AddressQuery.Structured, limit: Int): String =
-        searchUrl(limit) {
-            addQueryParameter("street", fields.street)
-            fields.city?.let { addQueryParameter("city", it) }
-            fields.state?.let { addQueryParameter("state", it) }
-            fields.postalCode?.let { addQueryParameter("postalcode", it) }
         }
 
     private fun searchUrl(limit: Int, fill: okhttp3.HttpUrl.Builder.() -> Unit): String =
@@ -293,32 +303,10 @@ class GeocodingClient(
             .build()
             .toString()
 
-        val body = fetchCached(url, REVERSE_CACHE_MILLIS) ?: return@withContext null
+        val body = cachedHttp.get(url, REVERSE_CACHE_MILLIS) ?: return@withContext null
         runCatching { json.decodeFromString<NominatimResult>(body) }.getOrNull()?.toPlace(null)
             // Falling back to coordinates keeps "drop a pin here" working offline.
             ?: Place(name = "Dropped pin", position = position, detail = position.toString())
-    }
-
-    private fun fetchCached(url: String, maxAgeMillis: Long): String? {
-        cache.read(url, maxAgeMillis)?.let { return it }
-        return try {
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", OverpassClient.USER_AGENT)
-                .header("Accept-Language", java.util.Locale.getDefault().toLanguageTag())
-                .build()
-            http.newCall(request).execute().use { response ->
-                val text = response.body?.string()
-                if (response.isSuccessful && !text.isNullOrBlank()) {
-                    cache.write(url, text)
-                    text
-                } else {
-                    null
-                }
-            }
-        } catch (e: IOException) {
-            null
-        }
     }
 
     private companion object {
@@ -328,7 +316,6 @@ class GeocodingClient(
         /** Within this of the driver, a result is "near me" and sorted by distance. */
         const val LOCAL_RESULT_METERS = 60_000.0
 
-        /** Nominatim's usage policy is one request a second; the second pass respects it. */
-        const val SECOND_PASS_DELAY_MILLIS = 1_100L
+
     }
 }

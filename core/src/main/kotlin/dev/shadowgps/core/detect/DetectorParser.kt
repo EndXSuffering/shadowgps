@@ -19,6 +19,14 @@ import dev.shadowgps.core.osm.OsmElement
  *
  * Real data is messier than that, so every rule below has fallbacks, and anything that
  * cannot be confidently placed as roadside equipment is dropped rather than guessed at.
+ *
+ * Worth stating plainly, because it looks like a missing integration: **DeFlock is not a
+ * separate source of cameras.** It does not run a camera database of its own — every marker
+ * on its map is an OpenStreetMap node with these tags, fetched through Overpass, and
+ * submissions made there go into OpenStreetMap rather than anywhere private. Reading the
+ * tags above is reading DeFlock's data, from the same place DeFlock reads it, and it comes
+ * with something their map cannot offer: it keeps working with no signal, from a saved
+ * region, without asking anybody where the driver is.
  */
 object DetectorParser {
 

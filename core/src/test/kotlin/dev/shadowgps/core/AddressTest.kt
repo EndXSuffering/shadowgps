@@ -317,6 +317,31 @@ class AddressTest {
         assertNull(AddressQuery.postcodeIn("500 Elm Street, Durham, NC"))
     }
 
+    // ------------------------------------------------------------------ casing
+
+    @Test
+    fun `a shouted address is made readable`() {
+        // Authoritative address data comes back in capitals, which is correct and unreadable.
+        assertEquals(
+            "1600 Pennsylvania Ave NW",
+            AddressLabel.readableCase("1600 PENNSYLVANIA AVE NW"),
+        )
+        assertEquals("San Antonio", AddressLabel.readableCase("SAN ANTONIO"))
+    }
+
+    @Test
+    fun `a route number keeps its capitals`() {
+        // "Tx-151" is not a road anybody has heard of.
+        assertEquals("8227 TX-151", AddressLabel.readableCase("8227 TX-151"))
+        assertEquals("100 US-90 W", AddressLabel.readableCase("100 US-90 W"))
+    }
+
+    @Test
+    fun `compass suffixes are left alone`() {
+        assertEquals("Elm Street SE", AddressLabel.readableCase("ELM STREET SE"))
+        assertEquals("N Main Street", AddressLabel.readableCase("N MAIN STREET"))
+    }
+
     // ------------------------------------------------------------- distinguishing
 
     @Test

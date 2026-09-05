@@ -38,6 +38,29 @@ data class AddressParts(
 object AddressLabel {
 
     /**
+     * Turns a shouted address into a readable one.
+     *
+     * Authoritative address databases hand everything back in capitals — "8227 TX-151, SAN
+     * ANTONIO, TX" — which is correct and unreadable in a list. Casing it word by word is
+     * nearly right, and wrong in the two places that matter: a compass suffix is not "Nw",
+     * and a route number is not "Tx-151". Anything carrying a digit, and the short
+     * directional and state abbreviations, are left exactly as they came.
+     */
+    fun readableCase(raw: String): String =
+        raw.split(" ").joinToString(" ") { word ->
+            when {
+                word.isEmpty() -> word
+                word.any(Char::isDigit) -> word
+                word.length <= 2 && word.all(Char::isUpperCase) -> word
+                word.uppercase() in KEEP_UPPERCASE -> word.uppercase()
+                else -> word.lowercase().replaceFirstChar(Char::uppercaseChar)
+            }
+        }
+
+    /** Compass suffixes, which look wrong in any case but their own. */
+    private val KEEP_UPPERCASE = setOf("NE", "NW", "SE", "SW", "N", "S", "E", "W")
+
+    /**
      * House number and street, in the order people say them.
      *
      * Null without a street, deliberately: a house number on its own is not an address, and

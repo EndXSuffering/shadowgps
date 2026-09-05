@@ -232,12 +232,16 @@ fun SearchPanel(
                                 PlaceRow(
                                     title = place.shortName,
                                     detail = place.addressLine,
-                                    tag = if (wantedBuilding && !place.isExactAddress) {
-                                        "Road — no exact match for that number"
-                                    } else {
-                                        place.category
+                                    tag = when {
+                                        wantedBuilding && !place.isExactAddress ->
+                                            "Road — no exact match for that number"
+                                        // Address-range data lands on the block, not the
+                                        // door. Better said now than discovered on arrival.
+                                        place.approximate -> "Approximate — address range data"
+                                        else -> place.category
                                     },
-                                    tagIsWarning = wantedBuilding && !place.isExactAddress,
+                                    tagIsWarning = (wantedBuilding && !place.isExactAddress) ||
+                                        place.approximate,
                                     distance = userPosition?.let {
                                         Formatting.distance(haversineMeters(it, place.position), units)
                                     },
