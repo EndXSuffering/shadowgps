@@ -4,7 +4,9 @@ import dev.shadowgps.core.search.AddressLabel
 import dev.shadowgps.core.search.AddressParts
 import dev.shadowgps.core.search.AddressQuery
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -246,5 +248,105 @@ class AddressTest {
 
         assertEquals("coffee near Duke University", split.searchable)
         assertNull(split.unit)
+    }
+
+    // ------------------------------------------------------- structured lookup
+
+    @Test
+    fun `a route-numbered address is broken into fields`() {
+        // The address that started this: free-text search reads the whole line as the
+        // highway and returns stretches of road, miles apart and indistinguishable.
+        val split = AddressQuery.split("8227 TX-151 Ste 102, San Antonio, TX 78245")
+        assertEquals("8227 TX-151, San Antonio, TX 78245", split.searchable)
+        assertEquals("Ste 102", split.unit)
+
+        val fields = AddressQuery.structure(split.searchable)!!
+        assertEquals("8227 TX-151", fields.street)
+        assertEquals("San Antonio", fields.city)
+        assertEquals("TX", fields.state)
+        assertEquals("78245", fields.postalCode)
+    }
+
+    @Test
+    fun `a town with no state still divides up`() {
+        val fields = AddressQuery.structure("500 Elm Street, Durham")!!
+
+        assertEquals("500 Elm Street", fields.street)
+        assertEquals("Durham", fields.city)
+        assertNull(fields.state)
+        assertNull(fields.postalCode)
+    }
+
+    @Test
+    fun `a zip plus four is kept whole`() {
+        val fields = AddressQuery.structure("1600 Pennsylvania Ave NW, Washington, DC 20500-0003")!!
+
+        assertEquals("Washington", fields.city)
+        assertEquals("DC", fields.state)
+        assertEquals("20500-0003", fields.postalCode)
+    }
+
+    @Test
+    fun `nothing to divide means no structured query`() {
+        // Better one free-text search than a structured one built on a guess.
+        assertNull(AddressQuery.structure("coffee near Duke University"))
+        assertNull(AddressQuery.structure("San Antonio"))
+    }
+
+    @Test
+    fun `a leading house number is what names a building`() {
+        assertTrue(AddressQuery.namesABuilding("8227 TX-151, San Antonio, TX 78245"))
+        assertTrue(AddressQuery.namesABuilding("221B Baker Street, London"))
+        assertTrue(AddressQuery.namesABuilding("1600 Pennsylvania Ave NW"))
+    }
+
+    @Test
+    fun `a numbered road is not a building`() {
+        // "TX-151" has a digit in it and is a road. Calling that a building would have the
+        // app apologising for a missing house number on every route-numbered search.
+        assertFalse(AddressQuery.namesABuilding("TX-151, San Antonio, TX"))
+        assertFalse(AddressQuery.namesABuilding("Highway 151, San Antonio"))
+        assertFalse(AddressQuery.namesABuilding("Duke University, Durham"))
+        assertFalse(AddressQuery.namesABuilding("78245"))
+    }
+
+    @Test
+    fun `the typed postcode is found for ranking`() {
+        assertEquals("78245", AddressQuery.postcodeIn("8227 TX-151, San Antonio, TX 78245"))
+        assertEquals("27701", AddressQuery.postcodeIn("500 Elm Street, Durham, NC 27701"))
+        assertNull(AddressQuery.postcodeIn("500 Elm Street, Durham, NC"))
+    }
+
+    // ------------------------------------------------------------- distinguishing
+
+    @Test
+    fun `two stretches of the same road are told apart by district`() {
+        // Both are TX-151 in San Antonio 78245. Without the neighbourhood the two rows read
+        // identically and there is nothing to choose between them but tapping one.
+        val west = AddressParts(
+            name = "Northwest Loop",
+            road = "Northwest Loop",
+            district = "Westwood Village",
+            settlement = "San Antonio",
+            state = "Texas",
+            postcode = "78245",
+        )
+        val east = west.copy(district = "Valley Hi")
+
+        assertEquals("Westwood Village, San Antonio, Texas, 78245", AddressLabel.locality(west))
+        assertEquals("Valley Hi, San Antonio, Texas, 78245", AddressLabel.locality(east))
+    }
+
+    @Test
+    fun `a district that merely repeats the city is left out`() {
+        val parts = AddressParts(
+            name = "Acme Dental",
+            houseNumber = "500",
+            road = "Elm Street",
+            district = "Durham",
+            settlement = "Durham",
+        )
+
+        assertEquals("500 Elm Street, Durham", AddressLabel.locality(parts))
     }
 }

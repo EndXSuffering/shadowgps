@@ -99,6 +99,7 @@ import dev.shadowgps.core.routing.PrivacyProfile
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteStep
+import dev.shadowgps.core.search.AddressQuery
 import dev.shadowgps.core.traffic.CongestionLevel
 import dev.shadowgps.core.traffic.CongestionSpan
 import dev.shadowgps.core.traffic.TrafficModel
@@ -223,11 +224,20 @@ fun SearchPanel(
                             suggestions.first().unit?.let { unit ->
                                 item { SectionLabel("Searched without \"$unit\" — it is kept on the result") }
                             }
+                            // A building was asked for and only roads came back. Saying so
+                            // is the difference between a result the driver can judge and
+                            // two identical-looking lines they have to tap to tell apart.
+                            val wantedBuilding = AddressQuery.namesABuilding(query)
                             items(suggestions) { place ->
                                 PlaceRow(
                                     title = place.shortName,
                                     detail = place.addressLine,
-                                    tag = place.category,
+                                    tag = if (wantedBuilding && !place.isExactAddress) {
+                                        "Road — no exact match for that number"
+                                    } else {
+                                        place.category
+                                    },
+                                    tagIsWarning = wantedBuilding && !place.isExactAddress,
                                     distance = userPosition?.let {
                                         Formatting.distance(haversineMeters(it, place.position), units)
                                     },
@@ -319,6 +329,8 @@ private fun PlaceRow(
     detail: String?,
     /** What sort of place it is, when the geocoder says: "Pharmacy", "Fast food". */
     tag: String?,
+    /** Draws the tag as a caution: this result is not quite what was asked for. */
+    tagIsWarning: Boolean = false,
     /** How far away it is, which is usually the fastest way to spot the right result. */
     distance: String?,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -374,8 +386,8 @@ private fun PlaceRow(
                 Text(
                     it,
                     style = MaterialTheme.typography.labelMedium,
-                    color = ShadowColors.Accent,
-                    maxLines = 1,
+                    color = if (tagIsWarning) ShadowColors.Caution else ShadowColors.Accent,
+                    maxLines = 2,
                 )
             }
         }

@@ -6,6 +6,7 @@ import dev.shadowgps.core.search.AddressLabel
 import dev.shadowgps.core.search.AddressParts
 import dev.shadowgps.core.search.AddressQuery
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -39,7 +40,32 @@ data class Place(
     val unit: String? = null,
     /** What sort of place this is, when known — "restaurant", "pharmacy". */
     val category: String? = null,
+    /**
+     * The house number the geocoder actually matched, when it matched one.
+     *
+     * Kept so a result can admit it is a road rather than a building. On a long highway a
+     * failed house-number match comes back as several stretches of the road itself, and
+     * without this the app presented them as though they were addresses.
+     */
+    val houseNumber: String? = null,
+    /** Kept apart from the address line so a typed postcode can be matched against it. */
+    val postcode: String? = null,
 ) {
+    /** Whether this pins a building, rather than a road or an area. */
+    val isExactAddress: Boolean get() = houseNumber != null
+
+    /**
+     * Whether this is in the postcode the driver typed.
+     *
+     * Compared on the leading five characters, so a ZIP+4 on either side still matches the
+     * plain ZIP on the other.
+     */
+    fun postcodeMatches(wanted: String): Boolean {
+        val mine = postcode?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val head = { text: String -> text.filter { it.isDigit() || it.isLetter() }.take(5).uppercase() }
+        return head(mine) == head(wanted)
+    }
+
     /**
      * Short label for a chip or a text field.
      *
@@ -70,6 +96,7 @@ private data class NominatimAddress(
     val pedestrian: String? = null,
     val suburb: String? = null,
     val neighbourhood: String? = null,
+    val quarter: String? = null,
     val city: String? = null,
     val town: String? = null,
     val village: String? = null,
@@ -78,9 +105,13 @@ private data class NominatimAddress(
     val state: String? = null,
     val postcode: String? = null,
 ) {
-    /** The most specific human-scale place name on offer, largest units last. */
+    /** The town this sits in, largest units last. */
     val settlement: String?
-        get() = city ?: town ?: village ?: hamlet ?: municipality ?: suburb ?: neighbourhood
+        get() = city ?: town ?: village ?: hamlet ?: municipality
+
+    /** The part of town, which is what tells two ends of a long road apart. */
+    val district: String?
+        get() = suburb ?: neighbourhood ?: quarter
 }
 
 @Serializable
@@ -101,7 +132,8 @@ private data class NominatimResult(
             name = name,
             houseNumber = address?.houseNumber,
             road = address?.road ?: address?.pedestrian,
-            settlement = address?.settlement,
+            settlement = address?.settlement ?: address?.district,
+            district = address?.district?.takeIf { address.settlement != null },
             state = address?.state,
             postcode = address?.postcode,
             displayName = displayName,
@@ -115,6 +147,11 @@ private data class NominatimResult(
             locality = AddressLabel.locality(parts, heading),
             unit = unit,
             category = readableCategory(),
+            houseNumber = address?.houseNumber ?: AddressLabel.street(parts)
+                ?.takeIf { street -> street != address?.road }
+                ?.substringBefore(' ')
+                ?.takeIf { it.any(Char::isDigit) },
+            postcode = address?.postcode,
         )
     }
 
@@ -140,53 +177,109 @@ class GeocodingClient(
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    /** Free-text search, biased towards [near] when a location is known. */
+    /**
+     * Looks up an address or a place.
+     *
+     * Two passes, because free-text matching has a specific and common failure: on a US
+     * address built round a route number — "8227 TX-151, San Antonio, TX 78245" — it decides
+     * the whole line is the highway and returns stretches of road rather than the building.
+     * Those come back with no house number, several of them, miles apart and reading
+     * identically. When that happens and the query clearly named a building, the address is
+     * broken into fields and asked again; a geocoder told exactly which part is the street
+     * reaches house-number data that free-text matching walks straight past.
+     *
+     * The second request only ever happens on that failure, so an ordinary search still
+     * costs exactly one.
+     */
     suspend fun search(query: String, near: LatLon? = null, limit: Int = 10): List<Place> =
         withContext(Dispatchers.IO) {
             if (query.isBlank()) return@withContext emptyList()
             val split = AddressQuery.split(query)
 
-            val url = "$endpoint/search".toHttpUrl().newBuilder()
-                .addQueryParameter("q", split.searchable)
-                .addQueryParameter("format", "jsonv2")
-                .addQueryParameter("limit", limit.toString())
-                // Without this the response carries no structured address at all, which is
-                // what forced the old code to guess at display_name with substringBefore.
-                .addQueryParameter("addressdetails", "1")
-                .addQueryParameter("dedupe", "1")
-                .apply {
-                    // A viewbox nudges results towards the driver without excluding others.
-                    if (near != null) {
-                        val box = dev.shadowgps.core.geo.BoundingBox.around(near, 40_000.0)
-                        addQueryParameter("viewbox", "${box.west},${box.north},${box.east},${box.south}")
-                    }
-                }
-                .build()
-                .toString()
+            val free = fetchPlaces(freeTextUrl(split.searchable, near, limit), split.unit)
+            if (free.any { it.isExactAddress } || !AddressQuery.namesABuilding(split.searchable)) {
+                return@withContext rankForDriver(free, near, split.searchable)
+            }
 
-            val body = fetchCached(url, SEARCH_CACHE_MILLIS) ?: return@withContext emptyList()
-            val places = runCatching { json.decodeFromString<List<NominatimResult>>(body) }
-                .getOrDefault(emptyList())
-                .mapNotNull { it.toPlace(split.unit) }
+            val fields = AddressQuery.structure(split.searchable)
+                ?: return@withContext rankForDriver(free, near, split.searchable)
 
-            rankForDriver(places, near)
+            // Nominatim asks for no more than a request a second, and this one follows hard
+            // on the heels of the last.
+            delay(SECOND_PASS_DELAY_MILLIS)
+            val exact = fetchPlaces(structuredUrl(fields, limit), split.unit)
+
+            // Only worth having if it did what the first pass could not.
+            val best = if (exact.any { it.isExactAddress }) exact else free
+            rankForDriver(best, near, split.searchable)
         }
+
+    private fun fetchPlaces(url: String, unit: String?): List<Place> {
+        val body = fetchCached(url, SEARCH_CACHE_MILLIS) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<NominatimResult>>(body) }
+            .getOrDefault(emptyList())
+            .mapNotNull { it.toPlace(unit) }
+    }
+
+    private fun freeTextUrl(query: String, near: LatLon?, limit: Int): String =
+        searchUrl(limit) {
+            addQueryParameter("q", query)
+            // A viewbox nudges results towards the driver without excluding others.
+            if (near != null) {
+                val box = dev.shadowgps.core.geo.BoundingBox.around(near, 40_000.0)
+                addQueryParameter("viewbox", "${box.west},${box.north},${box.east},${box.south}")
+            }
+        }
+
+    private fun structuredUrl(fields: AddressQuery.Structured, limit: Int): String =
+        searchUrl(limit) {
+            addQueryParameter("street", fields.street)
+            fields.city?.let { addQueryParameter("city", it) }
+            fields.state?.let { addQueryParameter("state", it) }
+            fields.postalCode?.let { addQueryParameter("postalcode", it) }
+        }
+
+    private fun searchUrl(limit: Int, fill: okhttp3.HttpUrl.Builder.() -> Unit): String =
+        "$endpoint/search".toHttpUrl().newBuilder()
+            .addQueryParameter("format", "jsonv2")
+            .addQueryParameter("limit", limit.toString())
+            // Without this the response carries no structured address at all, which is what
+            // forced the old code to guess at display_name with substringBefore.
+            .addQueryParameter("addressdetails", "1")
+            .addQueryParameter("dedupe", "1")
+            .apply(fill)
+            .build()
+            .toString()
 
     /**
-     * Puts anything nearby first, in distance order, and leaves the rest as Nominatim ranked
-     * them.
+     * Orders results the way a driver would.
      *
-     * Nominatim orders by how notable a place is, which is the wrong question for someone
-     * about to drive there: searching a street name from home should offer the one down the
-     * road before a more famous one three counties away. Only local results are reordered,
-     * so a deliberate search for somewhere distant still comes back in sensible order.
+     * Three things, in order. A result whose postcode is the one that was typed goes first —
+     * that is the driver telling the app which of several similar answers they meant, and it
+     * is the difference between two identical-looking stretches of the same road. Then a
+     * building beats a road, since a road result means the exact address was not found. Then
+     * whatever is nearest, because Nominatim orders by how notable a place is and the nearby
+     * match is nearly always the one meant. Anything far away keeps the geocoder's own order,
+     * so a deliberate search for somewhere distant is not shuffled.
      */
-    private fun rankForDriver(places: List<Place>, near: LatLon?): List<Place> {
-        if (near == null || places.size < 2) return places
-        val (local, elsewhere) = places.partition {
+    private fun rankForDriver(places: List<Place>, near: LatLon?, query: String): List<Place> {
+        if (places.size < 2) return places
+
+        val wantedPostcode = AddressQuery.postcodeIn(query)
+        val ranked = places.sortedWith(
+            compareByDescending<Place> { wantedPostcode != null && it.postcodeMatches(wantedPostcode) }
+                .thenByDescending { it.isExactAddress },
+        )
+        if (near == null) return ranked
+
+        val (local, elsewhere) = ranked.partition {
             haversineMeters(near, it.position) <= LOCAL_RESULT_METERS
         }
-        return local.sortedBy { haversineMeters(near, it.position) } + elsewhere
+        return local.sortedWith(
+            compareByDescending<Place> { wantedPostcode != null && it.postcodeMatches(wantedPostcode) }
+                .thenByDescending { it.isExactAddress }
+                .thenBy { haversineMeters(near, it.position) },
+        ) + elsewhere
     }
 
     /** Turns a map tap into something with a name. */
@@ -234,5 +327,8 @@ class GeocodingClient(
 
         /** Within this of the driver, a result is "near me" and sorted by distance. */
         const val LOCAL_RESULT_METERS = 60_000.0
+
+        /** Nominatim's usage policy is one request a second; the second pass respects it. */
+        const val SECOND_PASS_DELAY_MILLIS = 1_100L
     }
 }

@@ -11,8 +11,16 @@ data class AddressParts(
     val name: String? = null,
     val houseNumber: String? = null,
     val road: String? = null,
-    /** City, town, village or suburb — whichever is the most specific one available. */
+    /** City, town or village. */
     val settlement: String? = null,
+    /**
+     * Suburb, neighbourhood or quarter, when the geocoder knows one.
+     *
+     * The one thing that tells two stretches of the same long road apart. Without it, two
+     * results four miles apart on a city highway both read "San Antonio, Texas, 78245" and
+     * there is no way to choose between them but to tap one and see where the map goes.
+     */
+    val district: String? = null,
     val state: String? = null,
     val postcode: String? = null,
     /** The whole thing on one line, as a fallback when nothing is structured. */
@@ -109,8 +117,12 @@ object AddressLabel {
      * deciding which of five results is the one they meant.
      */
     fun locality(parts: AddressParts, title: String = title(parts)): String? {
-        val line = ArrayList<String>(4)
+        val line = ArrayList<String>(5)
         street(parts)?.takeIf { it != title }?.let { line.add(it) }
+        // The district earns its place only where it says something the city does not.
+        parts.district
+            ?.takeIf { it.isNotBlank() && it != title && !it.equals(parts.settlement, ignoreCase = true) }
+            ?.let { line.add(it) }
         parts.settlement?.takeIf { it != title && it.isNotBlank() }?.let { line.add(it) }
         parts.state?.takeIf { it.isNotBlank() }?.let { line.add(it) }
         parts.postcode?.takeIf { it.isNotBlank() }?.let { line.add(it) }
@@ -176,5 +188,79 @@ object AddressQuery {
         // Refusing to search at all would be worse than searching for the unit number, so a
         // query that was nothing but a unit is handed back untouched.
         return if (tidied.isBlank()) Split(raw.trim(), null) else Split(tidied, unit)
+    }
+
+    /**
+     * A free-text address broken into the fields a structured geocoder query takes.
+     *
+     * Free-text search has to guess where the street stops and the town starts, and on a US
+     * address built round a route number — "8227 TX-151, San Antonio, TX 78245" — it
+     * routinely guesses that the whole thing is the highway and hands back segments of road
+     * instead of the building. Naming the fields removes the guess, and a geocoder told
+     * exactly which part is the street will reach house-number interpolation data that
+     * free-text matching walks straight past.
+     */
+    data class Structured(
+        val street: String,
+        val city: String?,
+        val state: String?,
+        val postalCode: String?,
+    )
+
+    /** A postcode-shaped trailing token: US five or nine digit, and anything similar. */
+    private val TRAILING_POSTCODE = Regex("""(?:^|\s)(\d{4,6}(?:-\d{4})?)$""")
+
+    /** Two or three letters, as US states are abbreviated. */
+    private val STATE_CODE = Regex("""^[A-Za-z]{2,3}$""")
+
+    /** The postcode the driver typed, when they typed one. */
+    fun postcodeIn(raw: String): String? {
+        val tail = raw.split(",").lastOrNull()?.trim() ?: return null
+        return TRAILING_POSTCODE.find(tail)?.groupValues?.get(1)
+    }
+
+    /**
+     * Whether the query names a specific building, as opposed to a road or a place.
+     *
+     * The test is a leading house number — a first token that is digits, give or take a
+     * trailing letter — with a street after it. Merely containing a digit is not enough:
+     * "TX-151" is a road with a number in its name, and treating that as a building would
+     * have the app apologising for not finding a house on every route-numbered search.
+     */
+    fun namesABuilding(raw: String): Boolean {
+        val street = raw.split(",").firstOrNull()?.trim() ?: return false
+        val first = street.substringBefore(' ').trim()
+        // A lone token is a place name or a postcode, never a number and a street.
+        if (first.isEmpty() || first == street) return false
+        if (!first.first().isDigit()) return false
+        return first.dropLast(1).all { it.isDigit() || it == '-' || it == '/' }
+    }
+
+    /**
+     * Breaks a comma-separated address into fields, or null when there is not enough to go on.
+     *
+     * Returns null rather than guessing whenever the shape is not clearly an address: nothing
+     * to divide it, or nothing beyond the street to divide out. A structured query built from
+     * a guess is worse than the free-text one it replaces.
+     */
+    fun structure(raw: String): Structured? {
+        val chunks = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (chunks.size < 2) return null
+
+        val street = chunks.first()
+        var tail = chunks.last()
+        val postalCode = TRAILING_POSTCODE.find(tail)?.groupValues?.get(1)
+        if (postalCode != null) tail = tail.removeSuffix(postalCode).trim()
+
+        val state = tail.takeIf { it.isNotEmpty() && STATE_CODE.matches(it) }
+        // A tail that was neither a state code nor a postcode is a town in its own right.
+        val trailingCity = tail.takeIf { it.isNotEmpty() && state == null }
+
+        val city = (chunks.drop(1).dropLast(1) + listOfNotNull(trailingCity))
+            .joinToString(", ")
+            .takeIf { it.isNotBlank() }
+
+        if (city == null && state == null && postalCode == null) return null
+        return Structured(street = street, city = city, state = state, postalCode = postalCode)
     }
 }
