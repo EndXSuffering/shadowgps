@@ -67,8 +67,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -98,23 +103,40 @@ import dev.shadowgps.core.traffic.CongestionLevel
 import dev.shadowgps.core.traffic.CongestionSpan
 import dev.shadowgps.core.traffic.TrafficModel
 
-/** Destination entry: a text field that turns into a list of matches. */
+/**
+ * Destination entry.
+ *
+ * Three things were wrong with the old one and each made finding somewhere harder than
+ * typing it. Results were titled after whatever came before the first comma, which on a
+ * plain address is the house number, so a list read "500", "512", "530" with the streets
+ * underneath in grey. An empty result set drew nothing at all, so a search that found
+ * nothing looked identical to a search that never ran. And there was no way to say "go on
+ * then" — every query waited out the debounce whatever the driver pressed.
+ */
 @Composable
 fun SearchPanel(
     query: String,
     suggestions: List<Place>,
     searching: Boolean,
+    /** The query a search last finished for, which is what makes "no matches" sayable. */
+    searchedQuery: String?,
     destination: Place?,
     savedPlaces: List<SavedPlace>,
     recentPlaces: List<SavedPlace>,
     starredKeys: Set<String>,
+    /** Where the driver is, for showing how far away each result is. */
+    userPosition: LatLon?,
+    units: UnitSystem,
     onQueryChanged: (String) -> Unit,
+    onSearchNow: () -> Unit,
     onPick: (Place) -> Unit,
     onStar: (Place, Boolean) -> Unit,
     onClear: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val keyboard = LocalSoftwareKeyboardController.current
+
     Column(modifier = modifier) {
         Surface(
             shape = RoundedCornerShape(16.dp),
@@ -132,9 +154,25 @@ fun SearchPanel(
                 TextField(
                     value = query,
                     onValueChange = onQueryChanged,
-                    placeholder = { Text(destination?.shortName ?: "Where to?") },
+                    placeholder = {
+                        Text(
+                            destination?.shortName ?: "Search an address or place",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Words,
+                        imeAction = ImeAction.Search,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onSearch = {
+                            onSearchNow()
+                            keyboard?.hide()
+                        },
+                    ),
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = Color.Transparent,
                         unfocusedContainerColor = Color.Transparent,
@@ -164,7 +202,12 @@ fun SearchPanel(
         val showingShortcuts = query.isBlank() && suggestions.isEmpty() &&
             (savedPlaces.isNotEmpty() || recentPlaces.isNotEmpty())
 
-        if (suggestions.isNotEmpty() || showingShortcuts) {
+        // A finished search that found nothing has to say so. Silence here is what made the
+        // search feel unreliable — there was no way to tell it apart from not having run.
+        val foundNothing = !searching && suggestions.isEmpty() &&
+            query.isNotBlank() && searchedQuery == query
+
+        if (suggestions.isNotEmpty() || showingShortcuts || foundNothing) {
             Spacer(Modifier.height(8.dp))
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -172,52 +215,91 @@ fun SearchPanel(
                 tonalElevation = 3.dp,
                 shadowElevation = 8.dp,
             ) {
-                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
-                    if (suggestions.isNotEmpty()) {
-                        items(suggestions) { place ->
-                            PlaceRow(
-                                title = place.shortName,
-                                // The full address is the whole point of a search result —
-                                // one ellipsised line could not tell two similar streets
-                                // in different towns apart.
-                                detail = place.detail,
-                                icon = Icons.Rounded.Place,
-                                starred = starredKeys.contains(placeKey(place)),
-                                onClick = { onPick(place) },
-                                onStar = { onStar(place, !starredKeys.contains(placeKey(place))) },
-                            )
-                        }
-                    } else {
-                        if (savedPlaces.isNotEmpty()) {
-                            item { SectionLabel("Saved") }
-                            items(savedPlaces) { saved ->
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    when {
+                        suggestions.isNotEmpty() -> {
+                            // The unit came out of the query to make it findable at all, so
+                            // say so rather than letting it look silently ignored.
+                            suggestions.first().unit?.let { unit ->
+                                item { SectionLabel("Searched without \"$unit\" — it is kept on the result") }
+                            }
+                            items(suggestions) { place ->
                                 PlaceRow(
-                                    title = saved.title,
-                                    detail = saved.place.detail,
-                                    icon = Icons.Rounded.Star,
-                                    starred = true,
-                                    onClick = { onPick(saved.place) },
-                                    onStar = { onStar(saved.place, false) },
+                                    title = place.shortName,
+                                    detail = place.addressLine,
+                                    tag = place.category,
+                                    distance = userPosition?.let {
+                                        Formatting.distance(haversineMeters(it, place.position), units)
+                                    },
+                                    icon = Icons.Rounded.Place,
+                                    starred = starredKeys.contains(placeKey(place)),
+                                    onClick = { onPick(place) },
+                                    onStar = { onStar(place, !starredKeys.contains(placeKey(place))) },
                                 )
                             }
                         }
-                        if (recentPlaces.isNotEmpty()) {
-                            item { SectionLabel("Recent") }
-                            items(recentPlaces) { recent ->
-                                PlaceRow(
-                                    title = recent.title,
-                                    detail = recent.place.detail,
-                                    icon = Icons.Rounded.History,
-                                    starred = false,
-                                    onClick = { onPick(recent.place) },
-                                    onStar = { onStar(recent.place, true) },
-                                )
+
+                        foundNothing -> item { NoMatches(query) }
+
+                        else -> {
+                            if (savedPlaces.isNotEmpty()) {
+                                item { SectionLabel("Saved") }
+                                items(savedPlaces) { saved ->
+                                    PlaceRow(
+                                        title = saved.title,
+                                        detail = saved.place.addressLine,
+                                        tag = null,
+                                        distance = null,
+                                        icon = Icons.Rounded.Star,
+                                        starred = true,
+                                        onClick = { onPick(saved.place) },
+                                        onStar = { onStar(saved.place, false) },
+                                    )
+                                }
+                            }
+                            if (recentPlaces.isNotEmpty()) {
+                                item { SectionLabel("Recent") }
+                                items(recentPlaces) { recent ->
+                                    PlaceRow(
+                                        title = recent.title,
+                                        detail = recent.place.addressLine,
+                                        tag = null,
+                                        distance = null,
+                                        icon = Icons.Rounded.History,
+                                        starred = false,
+                                        onClick = { onPick(recent.place) },
+                                        onStar = { onStar(recent.place, true) },
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * What to do when a search comes back empty.
+ *
+ * Concrete advice rather than an apology: these are the three things that actually rescue a
+ * failed lookup against OpenStreetMap data, in the order they are worth trying.
+ */
+@Composable
+private fun NoMatches(query: String) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Text(
+            "Nothing found for \u201c$query\u201d",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Try the town or postcode as well, search the business name on its own, or " +
+                "long-press the map to drop a pin exactly where you want to go.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -235,6 +317,10 @@ private fun SectionLabel(text: String) {
 private fun PlaceRow(
     title: String,
     detail: String?,
+    /** What sort of place it is, when the geocoder says: "Pharmacy", "Fast food". */
+    tag: String?,
+    /** How far away it is, which is usually the fastest way to spot the right result. */
+    distance: String?,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     starred: Boolean,
     onClick: () -> Unit,
@@ -255,7 +341,26 @@ private fun PlaceRow(
         )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                distance?.let {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            }
+            // The full address, on two lines if it needs them: one ellipsised line could not
+            // tell two similar streets in different towns apart, which is the whole job.
             detail?.let {
                 Text(
                     it,
@@ -263,6 +368,14 @@ private fun PlaceRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+            tag?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ShadowColors.Accent,
+                    maxLines = 1,
                 )
             }
         }

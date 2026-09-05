@@ -32,7 +32,7 @@ class InstructionQualityTest {
         private val ways = ArrayList<OsmElement>()
         private var next = 1L
 
-        fun road(points: List<LatLon>, name: String?): Town {
+        fun road(points: List<LatLon>, name: String?, highway: String = "residential"): Town {
             val ids = points.map(::nodeAt)
             ways.add(
                 OsmElement(
@@ -40,7 +40,7 @@ class InstructionQualityTest {
                     id = next++,
                     nodes = ids,
                     tags = buildMap {
-                        put("highway", "residential")
+                        put("highway", highway)
                         if (name != null) put("name", name)
                     },
                 ),
@@ -206,6 +206,97 @@ class InstructionQualityTest {
 
         assertTrue(
             steps.any { it.maneuver == Maneuver.SLIGHT_RIGHT },
+            steps.joinToString { it.instruction },
+        )
+    }
+
+    @Test
+    fun `a side road leaving at a shallow angle is not a fork`() {
+        // The complaint this pins: a lane peeling off at twenty degrees, from a road that
+        // carries dead straight on, was being called a fork and announced as "bear left".
+        // There is nothing to choose here — the driver just keeps going.
+        val origin = LatLon(35.99, -78.90)
+        val junction = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val onwards = destinationPoint(junction, bearing = 90.0, meters = 300.0)
+        val sideRoad = destinationPoint(junction, bearing = 70.0, meters = 300.0)
+
+        val town = Town()
+            .road(listOf(origin, junction), "Straight Road")
+            .road(listOf(junction, onwards), "Straight Road")
+            .road(listOf(junction, sideRoad), "Shallow Lane")
+
+        val steps = instructionsFor(town, origin, onwards)
+
+        assertTrue(
+            steps.none { it.maneuver == Maneuver.SLIGHT_LEFT || it.maneuver == Maneuver.SLIGHT_RIGHT },
+            steps.joinToString { it.instruction },
+        )
+    }
+
+    @Test
+    fun `a driveway at a fork angle is still not a fork`() {
+        // Geometry alone would call this one: the drive leaves at ten degrees, close enough
+        // to the road to look ambiguous. A road does not fork into somebody's driveway, and
+        // the road classes are what say so.
+        val origin = LatLon(35.99, -78.90)
+        val junction = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val onwards = destinationPoint(junction, bearing = 90.0, meters = 300.0)
+        val drive = destinationPoint(junction, bearing = 80.0, meters = 120.0)
+
+        val town = Town()
+            .road(listOf(origin, junction), "Straight Road")
+            .road(listOf(junction, onwards), "Straight Road")
+            .road(listOf(junction, drive), null, highway = "service")
+
+        val steps = instructionsFor(town, origin, onwards)
+
+        assertTrue(
+            steps.none { it.maneuver == Maneuver.SLIGHT_LEFT || it.maneuver == Maneuver.SLIGHT_RIGHT },
+            steps.joinToString { it.instruction },
+        )
+    }
+
+    @Test
+    fun `leaving the straight line for the shallower branch is still announced`() {
+        // The mirror image of the side-road case, and the reason the rule is one-sided: here
+        // the route is the one peeling off while the road carries straight on, so the driver
+        // very much does need telling.
+        val origin = LatLon(35.99, -78.90)
+        val junction = destinationPoint(origin, bearing = 90.0, meters = 300.0)
+        val onwards = destinationPoint(junction, bearing = 90.0, meters = 300.0)
+        val branch = destinationPoint(junction, bearing = 70.0, meters = 300.0)
+
+        val town = Town()
+            .road(listOf(origin, junction), "Straight Road")
+            .road(listOf(junction, onwards), "Straight Road")
+            .road(listOf(junction, branch), "Shallow Lane")
+
+        val steps = instructionsFor(town, origin, branch)
+
+        assertTrue(
+            steps.any { it.maneuver == Maneuver.SLIGHT_LEFT },
+            steps.joinToString { it.instruction },
+        )
+    }
+
+    @Test
+    fun `a motorway and its slip road are a fork`() {
+        // Classes one rank apart, both carrying traffic on: exactly the junction where
+        // "keep left" earns its place.
+        val origin = LatLon(35.99, -78.90)
+        val split = destinationPoint(origin, bearing = 90.0, meters = 600.0)
+        val mainline = destinationPoint(split, bearing = 84.0, meters = 600.0)
+        val slip = destinationPoint(split, bearing = 96.0, meters = 400.0)
+
+        val town = Town()
+            .road(listOf(origin, split), "M1", highway = "motorway")
+            .road(listOf(split, mainline), "M1", highway = "motorway")
+            .road(listOf(split, slip), null, highway = "motorway_link")
+
+        val steps = instructionsFor(town, origin, mainline)
+
+        assertTrue(
+            steps.any { it.maneuver == Maneuver.SLIGHT_LEFT },
             steps.joinToString { it.instruction },
         )
     }

@@ -105,6 +105,10 @@ fun MapCanvas(
     val viewportRequest = remember { mutableStateOf<GeoBox?>(null) }
     val reportViewport = rememberUpdatedState(onViewportChanged)
 
+    // The view's own height is not observable, and the vehicle's resting place is a
+    // fraction of it, so it has to be picked up when the map is first measured.
+    val mapHeight = remember { mutableStateOf(0) }
+
     val mapView = remember {
         MapView(context).apply {
             setTileSource(TileSourceFactory.MAPNIK)
@@ -137,8 +141,9 @@ fun MapCanvas(
             // The viewport is meaningless until the view has been measured, and nothing
             // else reports it until the user pans — which would leave "save this area"
             // with no area for as long as they leave the map alone.
-            addOnFirstLayoutListener { _, _, _, _, _ ->
+            addOnFirstLayoutListener { _, _, top, _, bottom ->
                 viewportRequest.value = visibleBox(this@apply)
+                mapHeight.value = bottom - top
             }
 
             addMapListener(
@@ -287,6 +292,18 @@ fun MapCanvas(
         mapView.invalidate()
     }
 
+    // Sit the vehicle low on the screen while following, so most of the view is the road
+    // ahead rather than the road already driven. osmdroid rotates about the offset centre
+    // rather than the middle of the view, so the map still turns around the vehicle itself.
+    LaunchedEffect(followUser, mapHeight.value) {
+        val height = if (mapHeight.value > 0) mapHeight.value else mapView.height
+        val offset = if (followUser) (height * (FOLLOW_SCREEN_POSITION - 0.5f)).toInt() else 0
+        if (mapView.mapCenterOffsetY != offset) {
+            mapView.setMapCenterOffset(0, offset)
+            mapView.invalidate()
+        }
+    }
+
     // Acts on where the map settled rather than where it passed through, and skips a
     // reload when the new view is inside one already fetched — panning within an area
     // whose cameras are on screen needs nothing.
@@ -326,6 +343,15 @@ private fun visibleBox(map: MapView): GeoBox? {
 
 /** Settling time after the last map movement before the camera layer is fetched. */
 private const val VIEWPORT_DEBOUNCE_MILLIS = 400L
+
+/**
+ * Where down the screen the vehicle sits while being followed, as a fraction of the height.
+ *
+ * Centred, half the map is road already driven, which is of no use to anybody. Pushing the
+ * vehicle down the screen spends that space on the road ahead instead — far enough to see
+ * the next turn coming, not so far that the arrow is lost behind the bottom panel.
+ */
+private const val FOLLOW_SCREEN_POSITION = 0.70f
 
 /**
  * Recolours map tiles as they are drawn.

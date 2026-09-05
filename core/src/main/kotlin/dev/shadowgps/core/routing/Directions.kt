@@ -36,6 +36,20 @@ object Directions {
     private const val FORK_SEPARATION_DEGREES = 45.0
 
     /**
+     * How much straighter the route has to run than its rival before it is simply the road
+     * carrying on, rather than one side of a fork.
+     *
+     * This is what separates a fork from a side turning. At a fork the two branches leave at
+     * comparable angles and neither is obviously "straight on" — that is the whole reason
+     * the driver needs telling which side to take. A lane or slip road peeling off at twenty
+     * degrees from a road that continues dead ahead is not that: there is nothing to choose,
+     * and calling it a fork is where the phantom "bear right" on an unchanging road came
+     * from. Deliberately one-sided — when the *route* is the more angled of the two, the
+     * driver is leaving the straight line and does need to hear about it.
+     */
+    private const val OBVIOUS_CONTINUATION_DEGREES = 10.0
+
+    /**
      * A corner this sharp is announced even where the driver has no alternative.
      *
      * Well above [BEND_DEGREES]: a road that merely bends round without a junction needs no
@@ -196,19 +210,8 @@ object Directions {
         // A fork: another way out of this junction is also near-straight, so "carry on"
         // would not tell the driver which side to take. Checked before the name, because
         // which side to take matters more than what the road is called.
-        val rival = alternatives.minByOrNull { abs(it) }
-        if (rival != null) {
-            val ambiguous = abs(rival) < BEND_DEGREES &&
-                abs(signedTurnDegrees(rival, turn)) < FORK_SEPARATION_DEGREES &&
-                abs(turn - rival) > 1.0
-            if (ambiguous) {
-                return Decision(
-                    turnDegrees = turn,
-                    isManeuver = true,
-                    forkSide = if (turn > rival) Maneuver.SLIGHT_RIGHT else Maneuver.SLIGHT_LEFT,
-                )
-            }
-        }
+        val fork = forkSideAt(alternatives, next, turn)
+        if (fork != null) return Decision(turn, isManeuver = true, forkSide = fork)
 
         // Same physical way, or a name that merely went missing, is not a change of road.
         val sameWay = previous.wayId == next.wayId
@@ -218,16 +221,80 @@ object Directions {
         return Decision(turn, isManeuver = nameChanged)
     }
 
-    /** Turn angles of the other ways out of the junction, excluding the u-turn and the one taken. */
-    private fun alternativesAt(graph: RoadGraph, previous: RoadEdge, next: RoadEdge): List<Double> {
+    /** Another way out of a junction, and how far off the approach it leaves. */
+    private class Branch(val edge: RoadEdge, val turnDegrees: Double)
+
+    /** The other ways out of the junction, excluding the u-turn and the one taken. */
+    private fun alternativesAt(graph: RoadGraph, previous: RoadEdge, next: RoadEdge): List<Branch> {
         val approach = previous.headingApproaching(TURN_BASELINE_METERS)
-        val options = ArrayList<Double>(3)
+        val options = ArrayList<Branch>(3)
         graph.forEachOutgoing(previous.toNode) { candidate ->
             if (candidate == previous.reverseIndex || candidate == next.index) return@forEachOutgoing
-            options.add(signedTurnDegrees(approach, graph.edges[candidate].headingLeaving(TURN_BASELINE_METERS)))
+            val edge = graph.edges[candidate]
+            options.add(Branch(edge, signedTurnDegrees(approach, edge.headingLeaving(TURN_BASELINE_METERS))))
         }
         return options
     }
+
+    /**
+     * Which side of a fork the route takes, or null when this junction is not a fork.
+     *
+     * A fork is a junction where the road effectively ends and two comparable roads carry
+     * on, so "continue" would leave the driver guessing. Telling that apart from an ordinary
+     * side turning is the entire job here, and getting it wrong in the permissive direction
+     * is what produced "bear right" on a road that visibly runs straight: any lane, driveway
+     * or slip road leaving at a shallow angle used to qualify.
+     *
+     * Two things now have to hold beyond the branches being close together in heading.
+     *
+     *  - **Neither branch is the obvious continuation.** If the route runs nearly straight
+     *    on and its rival departs at a noticeably greater angle, there is nothing to choose
+     *    between: the driver simply carries on, and the rival is a turning they are passing.
+     *  - **The branches are comparable roads.** A road does not fork into a driveway or a
+     *    parking aisle. Where the rival is a rank below anything worth calling a road, or
+     *    well below the road being taken, it is an access track and not a choice.
+     */
+    private fun forkSideAt(alternatives: List<Branch>, next: RoadEdge, turn: Double): Maneuver? {
+        // The nearest rival in heading is the only one that can make this ambiguous.
+        val rival = alternatives.minByOrNull { abs(it.turnDegrees) } ?: return null
+        val rivalTurn = rival.turnDegrees
+
+        if (abs(rivalTurn) >= BEND_DEGREES) return null
+        if (abs(signedTurnDegrees(rivalTurn, turn)) >= FORK_SEPARATION_DEGREES) return null
+        // Identical headings offer the driver nothing to act on either way.
+        if (abs(turn - rivalTurn) <= 1.0) return null
+
+        if (abs(rivalTurn) - abs(turn) > OBVIOUS_CONTINUATION_DEGREES) return null
+        if (!comparableRoads(rival.edge, next)) return null
+
+        return if (turn > rivalTurn) Maneuver.SLIGHT_RIGHT else Maneuver.SLIGHT_LEFT
+    }
+
+    /** Whether two branches are the same sort of road, so that choosing between them is real. */
+    private fun comparableRoads(rival: RoadEdge, taken: RoadEdge): Boolean {
+        val rivalRank = roadRank(rival.highway)
+        return rivalRank >= MINIMUM_FORK_RANK && rivalRank >= roadRank(taken.highway) - 1
+    }
+
+    /**
+     * Rough importance of a road class.
+     *
+     * Only the ordering matters, and only for deciding whether two ways out of a junction
+     * are peers. Links sit one below the class they serve, which is what keeps a motorway
+     * and its slip road reading as a genuine fork while a service road never does.
+     */
+    private fun roadRank(highway: String): Int = when (highway) {
+        "motorway", "trunk" -> 5
+        "motorway_link", "trunk_link", "primary" -> 4
+        "primary_link", "secondary" -> 3
+        "secondary_link", "tertiary", "tertiary_link" -> 2
+        "unclassified", "residential", "living_street", "road" -> 1
+        // service, track, driveway, parking aisle and everything else.
+        else -> 0
+    }
+
+    /** Below this a way is access rather than a road, and never one side of a fork. */
+    private const val MINIMUM_FORK_RANK = 1
 
     private data class RoundaboutExit(val exitNumber: Int, val leaveIndex: Int)
 

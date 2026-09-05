@@ -102,6 +102,8 @@ data class MainUiState(
     val query: String = "",
     val suggestions: List<Place> = emptyList(),
     val searching: Boolean = false,
+    /** The last query a search actually completed for, so "no matches" can be said out loud. */
+    val searchedQuery: String? = null,
     val isRerouting: Boolean = false,
     /** Set when the route starts away from the driver, because nothing drivable is nearer. */
     val provisionalStart: ProvisionalStart? = null,
@@ -274,22 +276,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchJob?.cancel()
 
         if (query.isBlank()) {
-            _state.update { it.copy(suggestions = emptyList(), searching = false) }
+            _state.update { it.copy(suggestions = emptyList(), searching = false, searchedQuery = null) }
             return
         }
 
+        // Nominatim asks for at most one request a second; wait for a pause in typing.
+        runSearch(query, waitForPauseInTyping = true)
+    }
+
+    /**
+     * Searches for what has been typed without waiting out the debounce.
+     *
+     * Wired to the keyboard's search key. Waiting half a second after pressing "search" is
+     * the sort of thing that makes a search field feel broken.
+     */
+    fun searchNow() {
+        val query = _state.value.query
+        if (query.isBlank()) return
+        searchJob?.cancel()
+        runSearch(query, waitForPauseInTyping = false)
+    }
+
+    private fun runSearch(query: String, waitForPauseInTyping: Boolean) {
         searchJob = viewModelScope.launch {
-            // Nominatim asks for at most one request a second; wait for a pause in typing.
-            delay(SEARCH_DEBOUNCE_MILLIS)
+            if (waitForPauseInTyping) delay(SEARCH_DEBOUNCE_MILLIS)
             _state.update { it.copy(searching = true) }
             val results = geocoder.search(query, near = _state.value.userFix?.position)
-            _state.update { it.copy(suggestions = results, searching = false) }
+            _state.update {
+                it.copy(
+                    suggestions = results,
+                    searching = false,
+                    // Recorded so the panel can tell "nothing found" apart from "nothing
+                    // searched for yet". Without it an empty result set simply showed no
+                    // panel at all, which reads as the search having silently failed.
+                    searchedQuery = query,
+                )
+            }
         }
     }
 
     fun clearSearch() {
         searchJob?.cancel()
-        _state.update { it.copy(query = "", suggestions = emptyList(), searching = false) }
+        _state.update {
+            it.copy(query = "", suggestions = emptyList(), searching = false, searchedQuery = null)
+        }
     }
 
     fun chooseDestination(place: Place) {
@@ -298,6 +328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 destination = place,
                 query = "",
                 suggestions = emptyList(),
+                searchedQuery = null,
                 routes = emptyList(),
                 navigation = null,
             )
@@ -429,6 +460,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 query = "",
                 suggestions = emptyList(),
                 searching = false,
+                searchedQuery = null,
             )
         }
     }
