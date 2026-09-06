@@ -280,20 +280,81 @@ class InstructionQualityTest {
     }
 
     @Test
-    fun `a motorway and its slip road are a fork`() {
-        // Classes one rank apart, both carrying traffic on: exactly the junction where
-        // "keep left" earns its place.
-        val origin = LatLon(35.99, -78.90)
-        val split = destinationPoint(origin, bearing = 90.0, meters = 600.0)
-        val mainline = destinationPoint(split, bearing = 84.0, meters = 600.0)
-        val slip = destinationPoint(split, bearing = 96.0, meters = 400.0)
+    fun `driving past motorway exits says nothing at all`() {
+        // Reported from the road: "Bear left onto Anderson Loop" at every junction of a
+        // motorway the driver never left, six times over. Every exit is geometrically a
+        // fork — the mainline runs on, a slip road peels away at a shallow angle, and both
+        // are respectable roads — and an earlier rule about comparable road classes said
+        // that was enough. It is not. It is an exit, and ignoring one needs no commentary.
+        val origin = LatLon(29.60, -98.68)
+        var along = origin
+        val town = Town()
+        val mainline = ArrayList<LatLon>()
+        mainline.add(origin)
+
+        repeat(5) {
+            val junction = destinationPoint(along, bearing = 90.0, meters = 900.0)
+            mainline.add(junction)
+            // The slip road leaves at the shallow angle slip roads leave at.
+            town.road(
+                listOf(junction, destinationPoint(junction, bearing = 98.0, meters = 250.0)),
+                null,
+                highway = "motorway_link",
+            )
+            along = junction
+        }
+        // Split into separate ways at each junction, as OSM maps a long road.
+        for (i in 0 until mainline.size - 1) {
+            town.road(listOf(mainline[i], mainline[i + 1]), "Anderson Loop", highway = "motorway")
+        }
+
+        val steps = instructionsFor(town, origin, mainline.last())
+
+        assertTrue(
+            steps.none { it.maneuver == Maneuver.SLIGHT_LEFT || it.maneuver == Maneuver.SLIGHT_RIGHT },
+            steps.joinToString { it.instruction },
+        )
+        // Nothing to say between departing and arriving.
+        assertEquals(2, steps.size, steps.joinToString { it.instruction })
+    }
+
+    @Test
+    fun `taking the slip road off a motorway is announced`() {
+        // The other half of the same junction: leaving is a decision, staying is not.
+        val origin = LatLon(29.60, -98.68)
+        val junction = destinationPoint(origin, bearing = 90.0, meters = 900.0)
+        val onwards = destinationPoint(junction, bearing = 90.0, meters = 900.0)
+        val slip = destinationPoint(junction, bearing = 108.0, meters = 400.0)
 
         val town = Town()
-            .road(listOf(origin, split), "M1", highway = "motorway")
-            .road(listOf(split, mainline), "M1", highway = "motorway")
-            .road(listOf(split, slip), null, highway = "motorway_link")
+            .road(listOf(origin, junction), "Anderson Loop", highway = "motorway")
+            .road(listOf(junction, onwards), "Anderson Loop", highway = "motorway")
+            .road(listOf(junction, slip), "Exit 12", highway = "motorway_link")
 
-        val steps = instructionsFor(town, origin, mainline)
+        val steps = instructionsFor(town, origin, slip)
+
+        assertTrue(
+            steps.any { it.maneuver == Maneuver.SLIGHT_RIGHT || it.maneuver == Maneuver.RIGHT },
+            steps.joinToString { it.instruction },
+        )
+    }
+
+    @Test
+    fun `a genuine motorway split still gets a side`() {
+        // Where the road really does divide into two mainlines carrying different numbers,
+        // "keep left" earns its place — and the name no longer carries on, which is exactly
+        // what tells this apart from an exit.
+        val origin = LatLon(29.60, -98.68)
+        val split = destinationPoint(origin, bearing = 90.0, meters = 900.0)
+        val northWest = destinationPoint(split, bearing = 84.0, meters = 900.0)
+        val southEast = destinationPoint(split, bearing = 96.0, meters = 900.0)
+
+        val town = Town()
+            .road(listOf(origin, split), "Anderson Loop", highway = "motorway")
+            .road(listOf(split, northWest), "I-10 West", highway = "motorway")
+            .road(listOf(split, southEast), "I-35 South", highway = "motorway")
+
+        val steps = instructionsFor(town, origin, northWest)
 
         assertTrue(
             steps.any { it.maneuver == Maneuver.SLIGHT_LEFT },

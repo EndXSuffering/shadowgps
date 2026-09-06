@@ -210,7 +210,7 @@ object Directions {
         // A fork: another way out of this junction is also near-straight, so "carry on"
         // would not tell the driver which side to take. Checked before the name, because
         // which side to take matters more than what the road is called.
-        val fork = forkSideAt(alternatives, next, turn)
+        val fork = forkSideAt(alternatives, previous, next, turn)
         if (fork != null) return Decision(turn, isManeuver = true, forkSide = fork)
 
         // Same physical way, or a name that merely went missing, is not a change of road.
@@ -251,10 +251,23 @@ object Directions {
      *    on and its rival departs at a noticeably greater angle, there is nothing to choose
      *    between: the driver simply carries on, and the rival is a turning they are passing.
      *  - **The branches are comparable roads.** A road does not fork into a driveway or a
-     *    parking aisle. Where the rival is a rank below anything worth calling a road, or
-     *    well below the road being taken, it is an access track and not a choice.
+     *    parking aisle. Where the rival is a rank below anything worth calling a road, it is
+     *    an access track and not a choice.
+     *  - **The road the driver is on does not simply carry on.** Staying on the road you are
+     *    already on is not a decision, whatever the geometry says.
+     *
+     * That last rule is the one that matters on a motorway, and getting it wrong is what put
+     * "Bear left onto Anderson Loop" at every junction of a road the driver never left. Every
+     * exit is geometrically a fork — the mainline runs on, a slip road peels away at a
+     * shallow angle, and both are respectable roads. It is not a fork. It is an exit, and the
+     * driver ignoring it needs to be told precisely nothing.
      */
-    private fun forkSideAt(alternatives: List<Branch>, next: RoadEdge, turn: Double): Maneuver? {
+    private fun forkSideAt(
+        alternatives: List<Branch>,
+        previous: RoadEdge,
+        next: RoadEdge,
+        turn: Double,
+    ): Maneuver? {
         // The nearest rival in heading is the only one that can make this ambiguous.
         val rival = alternatives.minByOrNull { abs(it.turnDegrees) } ?: return null
         val rivalTurn = rival.turnDegrees
@@ -265,16 +278,31 @@ object Directions {
         if (abs(turn - rivalTurn) <= 1.0) return null
 
         if (abs(rivalTurn) - abs(turn) > OBVIOUS_CONTINUATION_DEGREES) return null
+        if (carriesOn(previous, next, rival.edge)) return null
         if (!comparableRoads(rival.edge, next)) return null
 
         return if (turn > rivalTurn) Maneuver.SLIGHT_RIGHT else Maneuver.SLIGHT_LEFT
     }
 
-    /** Whether two branches are the same sort of road, so that choosing between them is real. */
-    private fun comparableRoads(rival: RoadEdge, taken: RoadEdge): Boolean {
-        val rivalRank = roadRank(rival.highway)
-        return rivalRank >= MINIMUM_FORK_RANK && rivalRank >= roadRank(taken.highway) - 1
+    /**
+     * Whether the driver is simply staying on the road they were already on.
+     *
+     * Two ways to tell, and either is enough. The road keeps its name across the junction
+     * while the thing branching off does not share it — which is the shape of every exit ever
+     * built. Or the branch is a slip road while the route is not, since a slip road is by
+     * definition the way off rather than one of two ways on.
+     */
+    private fun carriesOn(previous: RoadEdge, next: RoadEdge, rival: RoadEdge): Boolean {
+        val road = previous.displayName
+        if (road != null && road == next.displayName && rival.displayName != road) return true
+        return isSlipRoad(rival.highway) && !isSlipRoad(next.highway)
     }
+
+    private fun isSlipRoad(highway: String): Boolean = highway.endsWith("_link")
+
+    /** Whether two branches are the same sort of road, so that choosing between them is real. */
+    private fun comparableRoads(rival: RoadEdge, taken: RoadEdge): Boolean =
+        roadRank(rival.highway) >= MINIMUM_FORK_RANK && roadRank(taken.highway) >= MINIMUM_FORK_RANK
 
     /**
      * Rough importance of a road class.
