@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlin.math.abs
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import androidx.lifecycle.Lifecycle
@@ -86,6 +87,9 @@ fun MapCanvas(
     vehicleHeadingDegrees: Double?,
     /** Frame the whole route instead of following the driver. */
     overview: Boolean,
+    /** Metres to the next manoeuvre, for closing in on it. Null when not navigating. */
+    metersToManeuver: Double?,
+    zoomForTurns: Boolean,
     onLongPress: (LatLon) -> Unit,
     onDetectorTapped: (Detector) -> Unit,
     onViewportChanged: (GeoBox) -> Unit,
@@ -272,7 +276,17 @@ fun MapCanvas(
             // Rotating the map to the heading is what makes a turn instruction read
             // correctly at a junction.
             heading?.let { mapView.mapOrientation = -it.toFloat() }
-            if (mapView.zoomLevelDouble < 16.0) mapView.controller.setZoom(17.0)
+
+            val wanted = followZoom(metersToManeuver, zoomForTurns)
+            if (wanted == null) {
+                // Turn zoom switched off: the driver keeps whatever zoom they chose, and
+                // the map only intervenes when it is too far out to be any use at all.
+                if (mapView.zoomLevelDouble < MINIMUM_USEFUL_ZOOM) {
+                    mapView.controller.setZoom(CRUISING_ZOOM)
+                }
+            } else if (abs(mapView.zoomLevelDouble - wanted) > ZOOM_DEADBAND) {
+                mapView.controller.zoomTo(wanted, ZOOM_ANIMATION_MILLIS)
+            }
         } else if (mapView.mapOrientation != 0f) {
             mapView.mapOrientation = 0f
         }
@@ -340,6 +354,44 @@ private fun visibleBox(map: MapView): GeoBox? {
         GeoBox(south = box.latSouth, west = box.lonWest, north = box.latNorth, east = box.lonEast)
     }.getOrNull()
 }
+
+/**
+ * How close in to sit while following, given how near the next manoeuvre is.
+ *
+ * A view wide enough to show the road ahead is too wide to show which of three lanes peels
+ * off at an exit, and the moment that detail matters is the last few hundred metres. Two
+ * steps rather than a continuous ramp, because a zoom that creeps constantly is more
+ * distracting than one that changes twice and settles.
+ */
+private fun followZoom(metersToManeuver: Double?, enabled: Boolean): Double? {
+    // Null means "leave the zoom alone", which is what the driver gets when they have
+    // turned the feature off — taking their chosen zoom away would be its own annoyance.
+    if (!enabled) return null
+    if (metersToManeuver == null) return CRUISING_ZOOM
+    return when {
+        metersToManeuver <= MANEUVER_CLOSE_METERS -> MANEUVER_ZOOM
+        metersToManeuver <= MANEUVER_APPROACH_METERS -> APPROACH_ZOOM
+        else -> CRUISING_ZOOM
+    }
+}
+
+private const val CRUISING_ZOOM = 17.0
+private const val APPROACH_ZOOM = 18.0
+private const val MANEUVER_ZOOM = 18.8
+
+/** Far enough out that a motorway exit is still several seconds away. */
+private const val MANEUVER_APPROACH_METERS = 400.0
+
+/** Close enough that the junction itself is what matters. */
+private const val MANEUVER_CLOSE_METERS = 120.0
+
+/** Ignore differences smaller than this, so a driver's own pinch is not fought. */
+private const val ZOOM_DEADBAND = 0.35
+
+private const val ZOOM_ANIMATION_MILLIS = 600L
+
+/** Below this the map is too far out to follow a road by, whatever the driver chose. */
+private const val MINIMUM_USEFUL_ZOOM = 16.0
 
 /** Settling time after the last map movement before the camera layer is fetched. */
 private const val VIEWPORT_DEBOUNCE_MILLIS = 400L

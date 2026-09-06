@@ -30,6 +30,15 @@ class RoadEdge(
     val ref: String?,
     val highway: String,
     val roundabout: Boolean,
+    /**
+     * The posted limit in km/h, or null where the road carries no `maxspeed` tag.
+     *
+     * Kept apart from [speedKph], which is the speed a car actually averages here after
+     * junctions and traffic are allowed for. Routing wants the realistic figure; a driver
+     * looking at a sign wants the legal one, and showing them a guess as though it were a
+     * sign would be worse than showing nothing.
+     */
+    val maxspeedKph: Double? = null,
 ) {
     /** Free-flow traversal time in seconds. */
     val travelSeconds: Double = lengthMeters / (speedKph / 3.6)

@@ -324,7 +324,185 @@ private fun OnlyTheRoadNotice() {
 }
 
 /**
- * What to do when a search comes back empty.
+/**
+ * Current speed, and the limit where the map knows one.
+ *
+ * The limit is drawn as the sign it stands for, because that is what a driver is comparing
+ * it against out of the windscreen. It appears only where the road actually carries a
+ * `maxspeed` tag: an empty space is honest, and a number invented from the road class would
+ * be a sign that disagrees with the real one.
+ */
+@Composable
+fun SpeedPanel(
+    speedMetersPerSecond: Double?,
+    speedLimitKph: Double?,
+    units: UnitSystem,
+    modifier: Modifier = Modifier,
+) {
+    val imperial = units == UnitSystem.IMPERIAL
+    val speed = speedMetersPerSecond?.let { metres ->
+        val perHour = metres * 3.6
+        if (imperial) perHour / 1.609344 else perHour
+    }
+    val limit = speedLimitKph?.let { if (imperial) it / 1.609344 else it }
+    val unitLabel = if (imperial) "mph" else "km/h"
+
+    // Comparing against the limit is the whole point, so the speed itself changes colour
+    // rather than making the driver do the arithmetic.
+    val over = speed != null && limit != null && speed > limit + SPEEDING_TOLERANCE
+
+    Row(modifier = modifier, verticalAlignment = Alignment.Bottom) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp,
+            shadowElevation = 8.dp,
+        ) {
+            Column(
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    speed?.let { kotlin.math.round(it).toInt().toString() } ?: "–",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = if (over) ShadowColors.Watched else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    unitLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        if (limit != null) {
+            Spacer(Modifier.width(8.dp))
+            SpeedLimitSign(limit = kotlin.math.round(limit).toInt(), imperial = imperial)
+        }
+    }
+}
+
+/** Over the limit by less than this and nobody wants to be shouted at about it. */
+private const val SPEEDING_TOLERANCE = 3.0
+
+/**
+ * A speed-limit sign.
+ *
+ * Drawn as the round red-ringed plate used nearly everywhere, rather than the white
+ * rectangle used in the United States, because one shape has to serve every country the map
+ * covers and the roundel is the one that reads as "limit" almost universally.
+ */
+@Composable
+private fun SpeedLimitSign(limit: Int, imperial: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(58.dp)
+            .background(Color.White, CircleShape)
+            .padding(4.dp)
+            .background(ShadowColors.Watched, CircleShape)
+            .padding(5.dp)
+            .background(Color.White, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                limit.toString(),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.Black,
+                maxLines = 1,
+            )
+            if (imperial) {
+                Text(
+                    "mph",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.Black,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * What the trip cost, once it is over.
+ *
+ * The number this whole app exists to move, and the only moment it can honestly be given:
+ * during the drive it is a forecast, and afterwards it is a fact. Counted from devices
+ * actually driven past, so a reroute half way through is reflected rather than papered over.
+ */
+@Composable
+fun TripSummaryCard(summary: TripSummary, units: UnitSystem, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    val tone = if (summary.wasUnseen) ShadowColors.Clear else exposureTone(summary.seenByCount)
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 12.dp,
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    summary.destinationName?.let { "Arrived at $it" } ?: "Arrived",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Dismiss")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ExposureBadge(count = summary.seenByCount, tone = tone)
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (summary.wasUnseen) {
+                            "Nothing saw you"
+                        } else {
+                            "Seen by ${summary.seenByCount} " +
+                                if (summary.seenByCount == 1) "device" else "devices"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = tone,
+                    )
+                    if (!summary.wasUnseen) {
+                        Text(
+                            summary.countsByKind.entries
+                                .sortedByDescending { it.value }
+                                .joinToString(", ") { (kind, count) -> "$count × ${kind.label}" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        Formatting.distance(summary.distanceMeters, units) +
+                            " · " + Formatting.duration(summary.durationSeconds),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            if (!summary.wasUnseen) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Counted from devices actually driven past, including any picked up " +
+                        "after a reroute.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** What to do when a search comes back empty.
  *
  * Concrete advice rather than an apology: these are the three things that actually rescue a
  * failed lookup against OpenStreetMap data, in the order they are worth trying.
@@ -1065,6 +1243,21 @@ fun SettingsSheet(
                 accent = ShadowColors.TrafficHeavy,
                 checked = settings.avoidHeavyTraffic,
                 onCheckedChange = { on -> onUpdate { it.copy(avoidHeavyTraffic = on) } },
+            )
+            SettingRow(
+                title = "Zoom in for turns",
+                subtitle = "Close in on the map as a turn approaches, so an exit or a lane " +
+                    "is legible, then pull back out again.",
+                checked = settings.zoomForTurns,
+                onCheckedChange = { on -> onUpdate { it.copy(zoomForTurns = on) } },
+            )
+            SettingRow(
+                title = "Show speed",
+                subtitle = "Your speed, and the posted limit where the map has one. Limits " +
+                    "come from OpenStreetMap and are shown only where a road is actually " +
+                    "tagged with one — never guessed from the kind of road.",
+                checked = settings.showSpeedometer,
+                onCheckedChange = { on -> onUpdate { it.copy(showSpeedometer = on) } },
             )
             SettingRow(
                 title = "Show coverage on the map",

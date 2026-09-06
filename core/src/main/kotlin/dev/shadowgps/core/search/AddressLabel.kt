@@ -182,10 +182,34 @@ object AddressQuery {
         RegexOption.IGNORE_CASE,
     )
 
+    /**
+     * A house number typed straight into its street.
+     *
+     * Two or more letters, deliberately: "221B Baker Street" is a real house number and has
+     * to survive intact, while "8227TX-151" and "500Elm Street" are a missing space.
+     */
+    private val NUMBER_RUN_INTO_STREET = Regex("""^(\s*)(\d+)([A-Za-z]{2,})""")
+
+    /**
+     * Puts back the space between a house number and its street.
+     *
+     * Every geocoder reads "8227TX-151" as one nonsense token and finds nothing at all, which
+     * makes a missed space indistinguishable from an address that does not exist. Only the
+     * leading number is touched, since that is the one position where a run of digits against
+     * a word is always two things rather than one.
+     */
+    fun restoreMissingSpace(raw: String): String {
+        val head = raw.substringBefore(",")
+        val fixed = NUMBER_RUN_INTO_STREET.replace(head) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]} ${match.groupValues[3]}"
+        }
+        return if (fixed == head) raw else fixed + raw.substring(head.length)
+    }
+
     fun split(raw: String): Split {
         var unit: String? = null
 
-        val stripped = UNIT.replace(raw) { match ->
+        val stripped = UNIT.replace(restoreMissingSpace(raw)) { match ->
             val value = match.groupValues[2]
             if (value.none(Char::isDigit)) return@replace match.value
 

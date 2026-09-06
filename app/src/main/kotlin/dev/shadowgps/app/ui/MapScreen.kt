@@ -72,6 +72,7 @@ fun MapScreen(viewModel: MainViewModel) {
     // undo, and leaving mid-drive asks first, because that is not a thing to do by accident
     // on a gesture that starts at the edge of the screen.
     val canGoBack = showSettings ||
+        state.tripSummary != null ||
         pendingPin != null ||
         tappedDetector != null ||
         showDirections ||
@@ -83,6 +84,7 @@ fun MapScreen(viewModel: MainViewModel) {
     BackHandler(enabled = canGoBack) {
         when {
             showSettings -> showSettings = false
+            state.tripSummary != null -> viewModel.dismissTripSummary()
             pendingPin != null -> pendingPin = null
             tappedDetector != null -> tappedDetector = null
             showDirections -> showDirections = false
@@ -121,6 +123,8 @@ fun MapScreen(viewModel: MainViewModel) {
             vehiclePosition = state.navigation?.snappedPosition,
             vehicleHeadingDegrees = state.navigation?.routeHeadingDegrees,
             overview = state.overview,
+            metersToManeuver = state.navigation?.distanceToManeuverMeters,
+            zoomForTurns = state.settings.zoomForTurns,
             onLongPress = { position -> pendingPin = position },
             onDetectorTapped = { detector -> tappedDetector = detector },
             onViewportChanged = viewModel::loadDetectorsFor,
@@ -232,6 +236,19 @@ fun MapScreen(viewModel: MainViewModel) {
             }
         }
 
+        // ------------------------------------------------------------- speed
+        if (state.settings.showSpeedometer && state.locationGranted) {
+            SpeedPanel(
+                speedMetersPerSecond = state.speedMetersPerSecond,
+                speedLimitKph = state.speedLimitKph,
+                units = state.settings.units,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 16.dp, bottom = 140.dp)
+                    .navigationBarsPadding(),
+            )
+        }
+
         // ------------------------------------------------------------- bottom
         Column(
             Modifier
@@ -285,6 +302,16 @@ fun MapScreen(viewModel: MainViewModel) {
             }
 
             when {
+                // Arriving is the one moment the exposure number is a fact rather than a
+                // forecast, so it takes the bottom of the screen until dismissed.
+                state.tripSummary != null ->
+                    TripSummaryCard(
+                        summary = state.tripSummary!!,
+                        units = state.settings.units,
+                        onDismiss = viewModel::dismissTripSummary,
+                        modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+                    )
+
                 // The approach card at the top already says everything there is to say.
                 state.awaitingJoin -> Unit
 

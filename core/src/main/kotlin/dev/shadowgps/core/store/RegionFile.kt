@@ -58,7 +58,13 @@ object RegionFile {
     private const val MAGIC = "SGPSRGN"
 
     /** Bumped on any incompatible change; older files are rejected, not misread. */
-    const val VERSION: Int = 1
+/**
+     * Bumped to 2 when the posted speed limit joined each edge. A saved region written by
+     * the previous version has no limit to give, and rather than invent one the reader
+     * refuses it so the app re-downloads — a wrong number on a speed-limit sign is worse
+     * than a slow download.
+     */
+    const val VERSION: Int = 2
 
     private const val COORD_SCALE = 1e7
 
@@ -191,6 +197,8 @@ object RegionFile {
             out.writeLong(edge.wayId)
             out.writeFloat(edge.lengthMeters.toFloat())
             out.writeFloat(edge.speedKph.toFloat())
+            // NaN carries "no tag" through a float without a second field.
+            out.writeFloat((edge.maxspeedKph ?: Double.NaN).toFloat())
             out.writeInt(strings.indexOf(edge.name))
             out.writeInt(strings.indexOf(edge.ref))
             out.writeInt(strings.indexOf(edge.highway))
@@ -218,6 +226,7 @@ object RegionFile {
             val wayId = input.readLong()
             val length = input.readFloat().toDouble()
             val speed = input.readFloat().toDouble()
+            val posted = input.readFloat().toDouble().takeIf { !it.isNaN() }
             val name = strings.at(input.readInt())
             val ref = strings.at(input.readInt())
             val highway = strings.at(input.readInt()) ?: "road"
@@ -244,6 +253,7 @@ object RegionFile {
                     ref = ref,
                     highway = highway,
                     roundabout = roundabout,
+                    maxspeedKph = posted,
                 ),
             )
         }

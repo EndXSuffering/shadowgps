@@ -101,6 +101,10 @@ object GraphBuilder {
         val tags = way.tags
         val direction = onewayOf(tags)
         val speed = Speeds.speedKph(tags)
+        // Only a real tag counts. A default speed for the road class is a reasonable guess
+        // for routing and would be a lie on a speed-limit sign.
+        val posted = Speeds.parseMaxspeedKph(tags["maxspeed"])
+            ?: Speeds.parseMaxspeedKph(tags["maxspeed:forward"])
         val roundabout = tags["junction"].let { it == "roundabout" || it == "circular" }
         val name = tags["name"]?.takeIf { it.isNotBlank() }
         val ref = tags["ref"]?.takeIf { it.isNotBlank() }
@@ -145,6 +149,7 @@ object GraphBuilder {
                             ref = ref,
                             highway = highway,
                             roundabout = roundabout,
+                            maxspeedKph = posted,
                         )
                         out.add(forward)
                     }
@@ -161,6 +166,7 @@ object GraphBuilder {
                             ref = ref,
                             highway = highway,
                             roundabout = roundabout,
+                            maxspeedKph = posted,
                         )
                         out.add(backward)
                     }

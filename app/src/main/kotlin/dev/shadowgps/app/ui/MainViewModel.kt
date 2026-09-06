@@ -22,6 +22,7 @@ import dev.shadowgps.app.nav.NavigationHub
 import dev.shadowgps.app.nav.NavigationService
 import dev.shadowgps.app.nav.Speaker
 import dev.shadowgps.core.detect.Detector
+import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.format.Formatting
 import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.geo.LatLon
@@ -70,6 +71,23 @@ data class RegionDownloadState(
             MapDataRepository.RegionProgress.BUILDING -> "Building the map…"
             MapDataRepository.RegionProgress.SAVING -> "Saving to this device…"
         }
+}
+
+/**
+ * What a finished trip cost in surveillance.
+ *
+ * Shown on arrival because it is the one number this app exists to move, and a driver has
+ * no other way to know it: the cameras are behind them by then. Counted from devices
+ * actually passed rather than from the plan, so a reroute half way is reflected honestly.
+ */
+data class TripSummary(
+    val seenByCount: Int,
+    val countsByKind: Map<DetectorKind, Int>,
+    val distanceMeters: Double,
+    val durationSeconds: Double,
+    val destinationName: String?,
+) {
+    val wasUnseen: Boolean get() = seenByCount == 0
 }
 
 enum class Phase {
@@ -125,6 +143,12 @@ data class MainUiState(
     val recentPlaces: List<SavedPlace> = emptyList(),
     /** Conditions the routes on screen were planned under. */
     val traffic: TrafficModel = TrafficModel.FREE_FLOW,
+    /** Set on arrival, until the driver dismisses it. */
+    val tripSummary: TripSummary? = null,
+    /** Metres per second from the last fix, for the speedometer. */
+    val speedMetersPerSecond: Double? = null,
+    /** Posted limit for the road under the driver, in km/h, where the map has one. */
+    val speedLimitKph: Double? = null,
 ) {
     val selectedRoute: Route? get() = routes.getOrNull(selectedRouteIndex)
 
@@ -181,6 +205,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var lastRerouteAt = 0L
 
+    /**
+     * Devices already driven past on this trip.
+     *
+     * Accumulated rather than read off the finished route, because a reroute replaces the
+     * route wholesale and would otherwise wipe out everything passed before it.
+     */
+    private val passedDetectors = LinkedHashMap<String, DetectorKind>()
+    private var tripStartedAtMillis = 0L
+    private var tripDistanceMeters = 0.0
+
     init {
         viewModelScope.launch {
             settingsStore.settings.collect { settings ->
@@ -221,7 +255,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun onFix(fix: PositionFix) {
-        _state.update { it.copy(userFix = fix) }
+        _state.update {
+            it.copy(
+                userFix = fix,
+                // Read on every fix, not only while navigating: a driver glancing at their
+                // speed has not necessarily asked the app for a route.
+                speedMetersPerSecond = fix.speedMetersPerSecond,
+                speedLimitKph = speedLimitAt(fix),
+            )
+        }
         if (_state.value.phase != Phase.NAVIGATING) return
 
         // Still making our own way to a start the router could reach.
@@ -233,6 +275,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val engine = engine ?: return
 
         val navigation = engine.update(fix)
+        rememberPassedDetectors(navigation)
+        tripDistanceMeters = maxOf(tripDistanceMeters, navigation.distanceAlongRouteMeters)
         _state.update { it.copy(navigation = navigation) }
 
         announce(navigation)
@@ -240,6 +284,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         if (navigation.isOffRoute) rerouteIfDue(fix)
         if (navigation.hasArrived) finishNavigation()
+    }
+
+    /**
+     * Notes every device the driver has now gone past.
+     *
+     * By id, so a camera counted on the old route is not counted again on the new one after
+     * a reroute, and so the tally survives the route being replaced underneath it.
+     */
+    private fun rememberPassedDetectors(navigation: NavigationState) {
+        val route = _state.value.selectedRoute ?: return
+        for (encounter in route.exposure.encounters) {
+            if (encounter.alongRouteMeters <= navigation.distanceAlongRouteMeters) {
+                passedDetectors[encounter.detector.id] = encounter.detector.kind
+            }
+        }
+    }
+
+    /**
+     * The posted limit on the road under the driver.
+     *
+     * Snapped fresh rather than read off the route, so it is still right after a wrong turn
+     * — which is exactly when a driver is most likely to be on an unfamiliar road. Null
+     * whenever the map has no `maxspeed` tag there, because a guess on a speed-limit sign is
+     * worse than an empty space.
+     */
+    private fun speedLimitAt(fix: PositionFix): Double? {
+        val graph = planner?.graph ?: return null
+        val snap = graph.snapNearest(fix.position, SPEED_LIMIT_SNAP_METERS) ?: return null
+        return graph.edges[snap.edgeIndex].maxspeedKph
     }
 
     private fun announce(navigation: NavigationState) {
@@ -666,7 +739,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 announceDetectors = settings.warnAboutCameras,
             ),
         )
-        _state.update { it.copy(phase = Phase.NAVIGATING, routes = listOf(route), selectedRouteIndex = 0) }
+        beginTrip()
+        _state.update {
+            it.copy(
+                phase = Phase.NAVIGATING,
+                routes = listOf(route),
+                selectedRouteIndex = 0,
+                tripSummary = null,
+            )
+        }
 
         NavigationHub.publish(NavigationBanner(route.steps.firstOrNull()?.instruction ?: "Navigating", ""))
         NavigationService.start(getApplication())
@@ -782,12 +863,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopNavigation() {
+        // Ending a trip early is still a trip, and the cameras behind the driver are still
+        // behind them. Nothing to report on a trip that never got going, though.
+        val summary = if (passedDetectors.isNotEmpty() || tripDistanceMeters > 0.0) {
+            summariseTrip()
+        } else {
+            null
+        }
         engine = null
         joinWatcher = null
         speaker.stop()
         NavigationService.stop(getApplication())
         _state.update {
             it.copy(
+                tripSummary = summary,
                 phase = if (it.routes.isEmpty()) Phase.BROWSING else Phase.CHOOSING,
                 navigation = null,
                 isRerouting = false,
@@ -797,8 +886,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun beginTrip() {
+        passedDetectors.clear()
+        tripDistanceMeters = 0.0
+        tripStartedAtMillis = System.currentTimeMillis()
+    }
+
+    /** What the trip cost, counted from the devices actually driven past. */
+    private fun summariseTrip(): TripSummary = TripSummary(
+        seenByCount = passedDetectors.size,
+        countsByKind = passedDetectors.values.groupingBy { it }.eachCount(),
+        distanceMeters = tripDistanceMeters,
+        durationSeconds = if (tripStartedAtMillis == 0L) {
+            0.0
+        } else {
+            (System.currentTimeMillis() - tripStartedAtMillis) / 1000.0
+        },
+        destinationName = _state.value.destination?.shortName,
+    )
+
     private fun finishNavigation() {
         NavigationService.stop(getApplication())
+        val summary = summariseTrip()
         engine = null
         joinWatcher = null
         _state.update {
@@ -810,9 +919,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 provisionalStart = null,
                 awaitingJoin = false,
                 overview = false,
+                tripSummary = summary,
             )
         }
     }
+
+    fun dismissTripSummary() = _state.update { it.copy(tripSummary = null) }
 
     /**
      * Recomputes the route after a wrong turn.
@@ -1033,6 +1145,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          * off-route repeatedly without having gone anywhere wrong.
          */
         const val REROUTE_COOLDOWN_MILLIS = 25_000L
+        /** How far to look for a road when reading the posted limit under the driver. */
+        const val SPEED_LIMIT_SNAP_METERS = 40.0
+
         const val DETECTOR_LAYER_MAX_KM2 = 900.0
 
         /** How far outside the view to keep drawn cameras, so a small pan shows no gap. */

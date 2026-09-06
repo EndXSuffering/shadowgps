@@ -52,6 +52,21 @@ data class AppSettings(
      * driver would rather keep moving than shave a minute, and it costs time by design.
      */
     val avoidHeavyTraffic: Boolean = false,
+    /**
+     * Close in on the map as a turn approaches.
+     *
+     * A view wide enough to see the road ahead is too wide to see which of three lanes
+     * peels off at an exit. Zooming for the last couple of hundred metres buys that detail
+     * back exactly when it is wanted, and gives it up again afterwards.
+     */
+    val zoomForTurns: Boolean = true,
+    /**
+     * Show current speed, and the posted limit where the map knows one.
+     *
+     * The limit comes from the same OpenStreetMap data as everything else, and is shown only
+     * where a road actually carries a `maxspeed` tag — never guessed from the road class.
+     */
+    val showSpeedometer: Boolean = true,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -93,6 +108,8 @@ class SettingsStore(context: Context) {
             mapTheme = MapTheme.fromName(prefs.getString(KEY_MAP_THEME, null)),
             allowForTraffic = prefs.getBoolean(KEY_TRAFFIC, defaults.allowForTraffic),
             avoidHeavyTraffic = prefs.getBoolean(KEY_AVOID_TRAFFIC, defaults.avoidHeavyTraffic),
+            zoomForTurns = prefs.getBoolean(KEY_ZOOM_TURNS, defaults.zoomForTurns),
+            showSpeedometer = prefs.getBoolean(KEY_SPEEDOMETER, defaults.showSpeedometer),
         )
     }
 
@@ -107,6 +124,8 @@ class SettingsStore(context: Context) {
             .putString(KEY_MAP_THEME, settings.mapTheme.name)
             .putBoolean(KEY_TRAFFIC, settings.allowForTraffic)
             .putBoolean(KEY_AVOID_TRAFFIC, settings.avoidHeavyTraffic)
+            .putBoolean(KEY_ZOOM_TURNS, settings.zoomForTurns)
+            .putBoolean(KEY_SPEEDOMETER, settings.showSpeedometer)
             .apply()
     }
 
@@ -120,5 +139,7 @@ class SettingsStore(context: Context) {
         const val KEY_MAP_THEME = "map_theme"
         const val KEY_TRAFFIC = "allow_for_traffic"
         const val KEY_AVOID_TRAFFIC = "avoid_heavy_traffic"
+        const val KEY_ZOOM_TURNS = "zoom_for_turns"
+        const val KEY_SPEEDOMETER = "show_speedometer"
     }
 }

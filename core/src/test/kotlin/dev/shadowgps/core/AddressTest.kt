@@ -250,6 +250,51 @@ class AddressTest {
         assertNull(split.unit)
     }
 
+    // -------------------------------------------------------------- typos
+
+    @Test
+    fun `a missing space after the house number is put back`() {
+        // Reported: the space after the number was missed and the address simply never
+        // appeared. Every geocoder reads "8227TX-151" as one nonsense token and finds
+        // nothing, so a typo is indistinguishable from an address that does not exist.
+        assertEquals(
+            "8227 TX-151, San Antonio, TX 78245",
+            AddressQuery.split("8227TX-151, San Antonio, TX 78245").searchable,
+        )
+        assertEquals("500 Elm Street", AddressQuery.split("500Elm Street").searchable)
+    }
+
+    @Test
+    fun `a lettered house number survives intact`() {
+        // "221B" is a house number, not a typo. One trailing letter is a suffix; two or
+        // more is a street that lost its space.
+        assertEquals("221B Baker Street, London", AddressQuery.split("221B Baker Street, London").searchable)
+        assertEquals("100A Main St", AddressQuery.split("100A Main St").searchable)
+    }
+
+    @Test
+    fun `only the leading number is repaired`() {
+        // A number run against a word later in the line is somebody's actual street name or
+        // postcode, and none of this app's business.
+        assertEquals(
+            "500 Elm Street, Durham NC27701",
+            AddressQuery.restoreMissingSpace("500 Elm Street, Durham NC27701"),
+        )
+    }
+
+    @Test
+    fun `a missing space and a suite together still work`() {
+        val split = AddressQuery.split("8227TX-151 Ste 102, San Antonio, TX 78245")
+
+        assertEquals("8227 TX-151, San Antonio, TX 78245", split.searchable)
+        assertEquals("Ste 102", split.unit)
+    }
+
+    @Test
+    fun `a suite run into its number is understood`() {
+        assertEquals("Ste 102", AddressQuery.split("8227 TX-151 Ste102, San Antonio").unit)
+    }
+
     // ------------------------------------------------------- structured lookup
 
     @Test
