@@ -324,7 +324,6 @@ private fun OnlyTheRoadNotice() {
 }
 
 /**
-/**
  * Current speed, and the limit where the map knows one.
  *
  * The limit is drawn as the sign it stands for, because that is what a driver is comparing
@@ -502,7 +501,8 @@ fun TripSummaryCard(summary: TripSummary, units: UnitSystem, onDismiss: () -> Un
     }
 }
 
-/** What to do when a search comes back empty.
+/**
+ * What to do when a search comes back empty.
  *
  * Concrete advice rather than an apology: these are the three things that actually rescue a
  * failed lookup against OpenStreetMap data, in the order they are worth trying.
