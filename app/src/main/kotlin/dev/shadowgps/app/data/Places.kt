@@ -55,6 +55,14 @@ data class Place(
      * arriving near it, and the driver should not have to discover that on the way.
      */
     val approximate: Boolean = false,
+    /**
+     * This result is a road, not somewhere on it.
+     *
+     * Worth knowing for two reasons: a suite number means nothing on a motorway, and a road
+     * offered in answer to a house number is the geocoder saying it could not find the
+     * building — not that the building is here.
+     */
+    val isRoad: Boolean = false,
 ) {
     /** Whether this pins a building, rather than a road or an area. */
     val isExactAddress: Boolean get() = houseNumber != null
@@ -82,7 +90,9 @@ data class Place(
         get() {
             val head = name.substringBefore(",").trim()
             val label = if (head.isEmpty() || head.none(Char::isLetter)) name.trim() else head
-            return if (unit != null) "$label, $unit" else label
+            // "Stotzer Freeway, Ste 102" is not a place. A unit belongs to a building, and
+            // hanging one off a motorway makes a failed lookup look like a successful one.
+            return if (unit != null && !isRoad) "$label, $unit" else label
         }
 
     /**
@@ -152,6 +162,7 @@ private data class NominatimResult(
             locality = AddressLabel.locality(parts, heading),
             unit = unit,
             category = readableCategory(),
+            isRoad = category == "highway",
             houseNumber = address?.houseNumber ?: AddressLabel.street(parts)
                 ?.takeIf { street -> street != address?.road }
                 ?.substringBefore(' ')
@@ -280,17 +291,31 @@ class GeocodingClient(
             compareByDescending<Place> { wantedPostcode != null && it.postcodeMatches(wantedPostcode) }
                 .thenByDescending { it.isExactAddress },
         )
-        if (near == null) return ranked
+        if (near == null) return collapseDuplicates(ranked)
 
         val (local, elsewhere) = ranked.partition {
             haversineMeters(near, it.position) <= LOCAL_RESULT_METERS
         }
-        return local.sortedWith(
-            compareByDescending<Place> { wantedPostcode != null && it.postcodeMatches(wantedPostcode) }
-                .thenByDescending { it.isExactAddress }
-                .thenBy { haversineMeters(near, it.position) },
-        ) + elsewhere
+        return collapseDuplicates(
+            local.sortedWith(
+                compareByDescending<Place> { wantedPostcode != null && it.postcodeMatches(wantedPostcode) }
+                    .thenByDescending { it.isExactAddress }
+                    .thenBy { haversineMeters(near, it.position) },
+            ) + elsewhere,
+        )
     }
+
+    /**
+     * Collapses results that read identically.
+     *
+     * A long road is mapped as several ways, so asking for a house number on one hands back
+     * a fistful of segments — every one of them titled after the road, in the same city, with
+     * the same postcode, differing only in how far off they happen to be. Two rows a driver
+     * cannot tell apart are worse than one: they imply a choice that does not exist. Ranking
+     * has already run, so the survivor is the best of them.
+     */
+    private fun collapseDuplicates(places: List<Place>): List<Place> =
+        places.distinctBy { it.name to it.addressLine }
 
     /** Turns a map tap into something with a name. */
     suspend fun reverse(position: LatLon): Place? = withContext(Dispatchers.IO) {

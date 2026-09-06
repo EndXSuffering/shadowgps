@@ -85,11 +85,42 @@ internal class CensusGeocoder(private val http: HttpCache) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    /** Null when the service could not be reached, empty when it simply found nothing. */
+    /**
+     * Asks both ways before giving up.
+     *
+     * The structured form is the better question — it does not have to guess where the street
+     * ends — but it is also the stricter one, and a street written the way people write it
+     * rather than the way the file spells it ("TX-151" against "State Highway 151") can miss
+     * on the fields and still hit through the one-line parser, which does its own
+     * normalising. The second call only happens when the first found nothing.
+     */
     fun search(query: String, limit: Int): List<Place> {
-        val url = urlFor(query) ?: return emptyList()
-        val body = http.get(url, CACHE_MILLIS) ?: return emptyList()
+        val structured = AddressQuery.structure(query)?.let { fields ->
+            lookUp(limit) {
+                addPathSegment("address")
+                addQueryParameter("street", fields.street)
+                fields.city?.let { addQueryParameter("city", it) }
+                fields.state?.let { addQueryParameter("state", it) }
+                fields.postalCode?.let { addQueryParameter("zip", it) }
+            }
+        }.orEmpty()
+        if (structured.isNotEmpty()) return structured
 
+        return lookUp(limit) {
+            addPathSegment("onelineaddress")
+            addQueryParameter("address", query)
+        }
+    }
+
+    private fun lookUp(limit: Int, fill: okhttp3.HttpUrl.Builder.() -> Unit): List<Place> {
+        val url = "$ENDPOINT/geocoder/locations/".toHttpUrl().newBuilder()
+            .apply(fill)
+            .addQueryParameter("benchmark", BENCHMARK)
+            .addQueryParameter("format", "json")
+            .build()
+            .toString()
+
+        val body = http.get(url, CACHE_MILLIS) ?: return emptyList()
         return runCatching { json.decodeFromString<CensusEnvelope>(body) }
             .getOrNull()
             ?.result
@@ -97,32 +128,6 @@ internal class CensusGeocoder(private val http: HttpCache) {
             ?.take(limit)
             ?.mapNotNull { it.toPlace() }
             .orEmpty()
-    }
-
-    /**
-     * Prefers the structured endpoint, which does not have to guess where the street ends.
-     * Falls back to the one-line form when the query does not divide up cleanly.
-     */
-    private fun urlFor(query: String): String? {
-        val fields = AddressQuery.structure(query)
-        val builder = "$ENDPOINT/geocoder/locations/".toHttpUrl().newBuilder()
-
-        if (fields != null) {
-            builder.addPathSegment("address")
-            builder.addQueryParameter("street", fields.street)
-            fields.city?.let { builder.addQueryParameter("city", it) }
-            fields.state?.let { builder.addQueryParameter("state", it) }
-            fields.postalCode?.let { builder.addQueryParameter("zip", it) }
-        } else {
-            builder.addPathSegment("onelineaddress")
-            builder.addQueryParameter("address", query)
-        }
-
-        return builder
-            .addQueryParameter("benchmark", BENCHMARK)
-            .addQueryParameter("format", "json")
-            .build()
-            .toString()
     }
 
     private fun CensusMatch.toPlace(): Place? {
@@ -258,6 +263,7 @@ internal class PhotonGeocoder(private val http: HttpCache) {
             category = readableCategory(),
             houseNumber = properties.housenumber,
             postcode = properties.postcode,
+            isRoad = properties.osmKey == "highway",
         )
     }
 

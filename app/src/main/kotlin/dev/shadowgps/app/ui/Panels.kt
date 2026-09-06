@@ -226,15 +226,19 @@ fun SearchPanel(
                             }
                             // A building was asked for and only roads came back. Saying so
                             // is the difference between a result the driver can judge and
-                            // two identical-looking lines they have to tap to tell apart.
+                            // a line they have to tap to find out what it is.
                             val wantedBuilding = AddressQuery.namesABuilding(query)
+                            if (wantedBuilding && suggestions.none { it.isExactAddress }) {
+                                item { OnlyTheRoadNotice() }
+                            }
                             items(suggestions) { place ->
                                 PlaceRow(
                                     title = place.shortName,
                                     detail = place.addressLine,
                                     tag = when {
                                         wantedBuilding && !place.isExactAddress ->
-                                            "Road — no exact match for that number"
+                                            place.category?.let { "$it — not the address you asked for" }
+                                                ?: "Not the address you asked for"
                                         // Address-range data lands on the block, not the
                                         // door. Better said now than discovered on arrival.
                                         place.approximate -> "Approximate — address range data"
@@ -291,6 +295,31 @@ fun SearchPanel(
                 }
             }
         }
+    }
+}
+
+/**
+ * Shown when a house number was asked for and only the road came back.
+ *
+ * The address is not in any of the databases at house level — which happens, particularly on
+ * roads known by a route number. The road is still worth offering, since driving to it gets
+ * the driver to the right stretch of the right street, but they should know that is what
+ * they are accepting, and that there is a way to do better.
+ */
+@Composable
+private fun OnlyTheRoadNotice() {
+    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp)) {
+        Text(
+            "That number is not in the map data",
+            style = MaterialTheme.typography.bodyMedium,
+            color = ShadowColors.Caution,
+        )
+        Text(
+            "The road itself is below — driving to it gets you to the right stretch. For the " +
+                "exact spot, long-press the map where you want to go.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
