@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Declares this app to Android Auto as a navigation app, which is what allows it to draw on
-  the car screen and take over turn-by-turn from whatever was there before.
+  Declares this app to Android Auto.
+
+  "template" is the value for an app built on the Car App Library, which draws through the
+  host's templates rather than shipping its own car UI. The older "navigation" value belonged
+  to the legacy Android Auto navigation SDK and is not accepted here. What actually makes
+  this a navigation app is the NAVIGATION category on the service's intent filter.
 -->
 <automotiveApp>
-    <uses name="navigation" />
+    <uses name="template" />
 </automotiveApp>

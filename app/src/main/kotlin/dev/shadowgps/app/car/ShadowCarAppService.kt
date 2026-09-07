@@ -25,6 +25,12 @@ class ShadowCarAppService : CarAppService() {
      * release build trusts only the hosts the library itself vouches for, since a permissive
      * validator in a shipped app is an invitation to anything on the device that fancies
      * driving the navigation screen.
+     *
+     * That release branch leans on a resource the library marks private, which lint rightly
+     * grumbles about: it could vanish in a future version. It is the allowlist Google's own
+     * sample uses and there is no public equivalent, so the honest options are this or
+     * hard-coding host signature digests that would rot just as fast. Worth revisiting if
+     * this is ever actually shipped, which would need a driver-distraction review anyway.
      */
     override fun createHostValidator(): HostValidator =
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
