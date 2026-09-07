@@ -249,8 +249,10 @@ fun MapCanvas(
     // middle of the ocean. Move to the driver once, the first time we know where they are.
     val centredOnUser = remember { mutableStateOf(false) }
 
-    // The hot path: one marker moves, nothing is rebuilt.
-    LaunchedEffect(userFix, vehiclePosition, vehicleHeadingDegrees, followUser) {
+    // The hot path: one marker moves, nothing is rebuilt. Keyed on the distance to the next
+    // manoeuvre as well as on position, so closing in for a turn does not have to wait for
+    // the driver to move far enough to produce a different fix.
+    LaunchedEffect(userFix, vehiclePosition, vehicleHeadingDegrees, followUser, metersToManeuver) {
         // Prefer the route-matched position; fall back to the raw fix when not navigating.
         val shown = vehiclePosition ?: userFix?.position ?: return@LaunchedEffect
         // A GPS bearing is meaningless below walking pace and absent on many fixes, which
@@ -285,7 +287,13 @@ fun MapCanvas(
                     mapView.controller.setZoom(CRUISING_ZOOM)
                 }
             } else if (abs(mapView.zoomLevelDouble - wanted) > ZOOM_DEADBAND) {
-                mapView.controller.zoomTo(wanted, ZOOM_ANIMATION_MILLIS)
+                // Set rather than animate, and this is not a stylistic choice. osmdroid's
+                // animated zoom gives up silently while any other animation is running —
+                // and the pan to the vehicle, one line above, is running on every fix. Every
+                // animated zoom was therefore being dropped: the map never closed in for a
+                // turn, and never came back from the whole-route framing after Start, which
+                // is why it sat so far out.
+                mapView.controller.setZoom(wanted)
             }
         } else if (mapView.mapOrientation != 0f) {
             mapView.mapOrientation = 0f
@@ -387,8 +395,6 @@ private const val MANEUVER_CLOSE_METERS = 120.0
 
 /** Ignore differences smaller than this, so a driver's own pinch is not fought. */
 private const val ZOOM_DEADBAND = 0.35
-
-private const val ZOOM_ANIMATION_MILLIS = 600L
 
 /** Below this the map is too far out to follow a road by, whatever the driver chose. */
 private const val MINIMUM_USEFUL_ZOOM = 16.0
