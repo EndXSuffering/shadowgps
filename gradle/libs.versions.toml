@@ -36,6 +36,9 @@ compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 
 osmdroid-android = { module = "org.osmdroid:osmdroid-android", version.ref = "osmdroid" }
+# The API lives in "app"; "app-projected" is only the Android Auto host support and
+# carries none of the classes, so both are needed to compile against the library.
+androidx-car-app = { module = "androidx.car.app:app", version.ref = "carApp" }
 androidx-car-app-projected = { module = "androidx.car.app:app-projected", version.ref = "carApp" }
 
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }

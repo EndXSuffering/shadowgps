@@ -75,5 +75,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.osmdroid.android)
+    implementation(libs.androidx.car.app)
     implementation(libs.androidx.car.app.projected)
 }

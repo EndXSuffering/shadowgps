@@ -27,7 +27,7 @@ class ShadowCarAppService : CarAppService() {
      * driving the navigation screen.
      */
     override fun createHostValidator(): HostValidator =
-        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             HostValidator.ALLOW_ALL_HOSTS_VALIDATOR
         } else {
             HostValidator.Builder(applicationContext)
