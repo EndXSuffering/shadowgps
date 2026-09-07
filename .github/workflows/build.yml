@@ -53,6 +53,18 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug
 
+      # What actually ships, as opposed to what the source says. The manifest merger
+      # rewrites relative class names, folds in library manifests and can drop entries
+      # outright, and none of that is visible from the sources — which matters for the
+      # Android Auto service, since a car app that is not in the merged manifest is
+      # invisible to the host with no error anywhere to explain it.
+      - name: Show merged manifest
+        run: |
+          set -eu
+          manifest=$(find app/build/intermediates -name AndroidManifest.xml -path '*debug*'             -not -path '*aapt*' -not -path '*navigation*' | head -1)
+          echo "--- $manifest"
+          cat "$manifest"
+
       - name: Lint
         run: ./gradlew :app:lintDebug
 
