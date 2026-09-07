@@ -133,6 +133,7 @@ class RoutePlanner(
 
         val encountersByDetector = LinkedHashMap<String, DetectorEncounter>()
         var cumulative = 0.0
+        var tollMeters = 0.0
 
         for (position in 0 until count) {
             val edgeIndex = edgeIndices[position]
@@ -145,6 +146,7 @@ class RoutePlanner(
 
             pieces.add(sliceCoords(edge.coords, from, to))
             distances[position] = span
+            if (edge.toll) tollMeters += span
             startOffsets[position] = cumulative
 
             // Junction and turn delays are real time the driver spends, so they belong in
@@ -206,6 +208,7 @@ class RoutePlanner(
             exposure = exposure,
             freeFlowSeconds = freeFlowDurations.sum(),
             congestionSpans = CongestionSpans.build(distances, congestion),
+            tollMeters = tollMeters,
         )
     }
 

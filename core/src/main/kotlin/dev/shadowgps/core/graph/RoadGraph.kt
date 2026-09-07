@@ -31,6 +31,14 @@ class RoadEdge(
     val highway: String,
     val roundabout: Boolean,
     /**
+     * Whether driving this stretch costs money.
+     *
+     * Deliberately distinct from a toll gantry in the surveillance layer, which the app also
+     * knows about: one takes a payment, the other reads a plate. They very often sit on the
+     * same road, and a driver may well want to avoid either without the other.
+     */
+    val toll: Boolean = false,
+    /**
      * The posted limit in km/h, or null where the road carries no `maxspeed` tag.
      *
      * Kept apart from [speedKph], which is the speed a car actually averages here after

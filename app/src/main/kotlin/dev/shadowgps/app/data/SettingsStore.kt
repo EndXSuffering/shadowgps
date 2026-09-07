@@ -67,6 +67,14 @@ data class AppSettings(
      * where a road actually carries a `maxspeed` tag — never guessed from the road class.
      */
     val showSpeedometer: Boolean = true,
+    /**
+     * Prefer roads that do not charge.
+     *
+     * Separate from avoiding toll gantries in the surveillance list, which those roads are
+     * usually covered in: one switch is about money, the other about being photographed, and
+     * a driver may well want either without the other.
+     */
+    val avoidTolls: Boolean = false,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -110,6 +118,7 @@ class SettingsStore(context: Context) {
             avoidHeavyTraffic = prefs.getBoolean(KEY_AVOID_TRAFFIC, defaults.avoidHeavyTraffic),
             zoomForTurns = prefs.getBoolean(KEY_ZOOM_TURNS, defaults.zoomForTurns),
             showSpeedometer = prefs.getBoolean(KEY_SPEEDOMETER, defaults.showSpeedometer),
+            avoidTolls = prefs.getBoolean(KEY_AVOID_TOLLS, defaults.avoidTolls),
         )
     }
 
@@ -126,6 +135,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_AVOID_TRAFFIC, settings.avoidHeavyTraffic)
             .putBoolean(KEY_ZOOM_TURNS, settings.zoomForTurns)
             .putBoolean(KEY_SPEEDOMETER, settings.showSpeedometer)
+            .putBoolean(KEY_AVOID_TOLLS, settings.avoidTolls)
             .apply()
     }
 
@@ -141,5 +151,6 @@ class SettingsStore(context: Context) {
         const val KEY_AVOID_TRAFFIC = "avoid_heavy_traffic"
         const val KEY_ZOOM_TURNS = "zoom_for_turns"
         const val KEY_SPEEDOMETER = "show_speedometer"
+        const val KEY_AVOID_TOLLS = "avoid_tolls"
     }
 }

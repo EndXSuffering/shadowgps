@@ -59,12 +59,15 @@ object RegionFile {
 
     /** Bumped on any incompatible change; older files are rejected, not misread. */
 /**
-     * Bumped to 2 when the posted speed limit joined each edge. A saved region written by
-     * the previous version has no limit to give, and rather than invent one the reader
-     * refuses it so the app re-downloads — a wrong number on a speed-limit sign is worse
-     * than a slow download.
+     * Bumped to 2 for the posted speed limit, and to 3 for tolls. A saved region written by
+     * an earlier version has neither to give, and rather than invent them the reader refuses
+     * it so the app re-downloads — a wrong number on a speed-limit sign, or a toll road
+     * quietly presented as free, is worse than a slow download.
+     *
+     * Version 3 also replaced the lone roundabout boolean with a flags byte carrying six
+     * spare bits, so the next per-edge yes-or-no costs nobody a re-download.
      */
-    const val VERSION: Int = 2
+    const val VERSION: Int = 3
 
     private const val COORD_SCALE = 1e7
 
@@ -188,6 +191,16 @@ object RegionFile {
 
     // ------------------------------------------------------------------ edges
 
+    private fun edgeFlags(edge: RoadEdge): Int {
+        var flags = 0
+        if (edge.roundabout) flags = flags or FLAG_ROUNDABOUT
+        if (edge.toll) flags = flags or FLAG_TOLL
+        return flags
+    }
+
+    private const val FLAG_ROUNDABOUT = 1 shl 0
+    private const val FLAG_TOLL = 1 shl 1
+
     private fun writeEdges(out: DataOutputStream, graph: RoadGraph, strings: StringTable) {
         out.writeInt(graph.edgeCount)
         for (edge in graph.edges) {
@@ -202,7 +215,7 @@ object RegionFile {
             out.writeInt(strings.indexOf(edge.name))
             out.writeInt(strings.indexOf(edge.ref))
             out.writeInt(strings.indexOf(edge.highway))
-            out.writeBoolean(edge.roundabout)
+            out.writeByte(edgeFlags(edge))
 
             out.writeInt(edge.pointCount)
             for (i in 0 until edge.pointCount) {
@@ -230,7 +243,9 @@ object RegionFile {
             val name = strings.at(input.readInt())
             val ref = strings.at(input.readInt())
             val highway = strings.at(input.readInt()) ?: "road"
-            val roundabout = input.readBoolean()
+            val flags = input.readByte().toInt()
+            val roundabout = flags and FLAG_ROUNDABOUT != 0
+            val toll = flags and FLAG_TOLL != 0
 
             val pointCount = input.readInt()
             requireSane(pointCount, "edge point count")
@@ -253,6 +268,7 @@ object RegionFile {
                     ref = ref,
                     highway = highway,
                     roundabout = roundabout,
+                    toll = toll,
                     maxspeedKph = posted,
                 ),
             )

@@ -765,6 +765,15 @@ private fun RouteCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // Worth saying whether or not tolls were being avoided: a driver who did not
+                // ask still deserves to know before setting off rather than at the barrier.
+                if (route.usesTolls) {
+                    Text(
+                        "Toll road · ${Formatting.distance(route.tollMeters, units)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ShadowColors.Caution,
+                    )
+                }
                 if (route.trafficDelaySeconds > 60) {
                     Text(
                         "${Formatting.durationDelta(route.trafficDelaySeconds)} for traffic",
@@ -1243,6 +1252,15 @@ fun SettingsSheet(
                 accent = ShadowColors.TrafficHeavy,
                 checked = settings.avoidHeavyTraffic,
                 onCheckedChange = { on -> onUpdate { it.copy(avoidHeavyTraffic = on) } },
+            )
+            SettingRow(
+                title = "Avoid toll roads",
+                subtitle = "Prefer roads that do not charge, and take a fair detour to do it " +
+                    "— though a toll is still offered when it is the only way through. Not " +
+                    "the same as avoiding toll gantries above: that one is about being " +
+                    "photographed, this one is about paying.",
+                checked = settings.avoidTolls,
+                onCheckedChange = { on -> onUpdate { it.copy(avoidTolls = on) } },
             )
             SettingRow(
                 title = "Zoom in for turns",

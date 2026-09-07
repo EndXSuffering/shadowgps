@@ -41,6 +41,7 @@ import dev.shadowgps.core.routing.RouteFailure
 import dev.shadowgps.core.routing.RoutePlanner
 import dev.shadowgps.core.routing.RoutingOptions
 import dev.shadowgps.core.routing.SnapRadius
+import dev.shadowgps.core.routing.TOLL_AVERSION
 import dev.shadowgps.core.traffic.CONGESTION_AVERSION
 import dev.shadowgps.core.traffic.TrafficModel
 import java.time.LocalDateTime
@@ -675,6 +676,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Search settings, including whether busy roads are worth a detour in their own right. */
     private fun routingOptions(): RoutingOptions = RoutingOptions(
         congestionAversion = if (_state.value.settings.avoidHeavyTraffic) CONGESTION_AVERSION else 0.0,
+        tollAversion = if (_state.value.settings.avoidTolls) TOLL_AVERSION else 0.0,
     )
 
     private fun currentTraffic(): TrafficModel =
@@ -1100,7 +1102,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // setting the driver has just changed.
         val routingChanged = after.avoidedKinds != before.avoidedKinds ||
             after.avoidHeavyTraffic != before.avoidHeavyTraffic ||
-            after.allowForTraffic != before.allowForTraffic
+            after.allowForTraffic != before.allowForTraffic ||
+            after.avoidTolls != before.avoidTolls
         if (routingChanged && _state.value.phase == Phase.CHOOSING) {
             planRoutes()
         }

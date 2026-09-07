@@ -3,6 +3,7 @@ package dev.shadowgps.core.routing
 import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.geo.angularDifference
 import dev.shadowgps.core.geo.haversineMeters
+import dev.shadowgps.core.graph.RoadEdge
 import dev.shadowgps.core.graph.RoadGraph
 import dev.shadowgps.core.graph.Speeds
 import dev.shadowgps.core.traffic.TrafficTable
@@ -25,7 +26,35 @@ data class RoutingOptions(
      * modelled delay is weighted against the route beyond the seconds it actually costs.
      */
     val congestionAversion: Double = 0.0,
+    /**
+     * How much extra to charge for time spent on a road that costs money.
+     *
+     * Expressed as a multiple of the toll road's own driving time, so a value of 3 means a
+     * free route is preferred while it takes under four times as long. A multiplier rather
+     * than a flat ban, because a hard exclusion turns "avoid tolls" into "no route at all"
+     * the moment a bridge or a tunnel is the only way across, and silently failing to route
+     * is a worse answer than a route the driver can look at and reject.
+     */
+    val tollAversion: Double = 0.0,
 )
+
+/**
+ * Charged once for joining a toll road, on top of the per-second aversion.
+ *
+ * A toll costs money the moment it is used, however briefly, so a two-hundred-metre hop onto
+ * one is nearly as unwelcome as a long stretch. Without this the aversion alone would happily
+ * take a short toll link to save a few seconds.
+ */
+const val TOLL_ENTRY_SECONDS: Double = 240.0
+
+/**
+ * Weight on toll-road time when the driver has asked to avoid tolls.
+ *
+ * Three means a free route wins while it takes under about four times as long. Firm enough
+ * to send a trip the long way round a turnpike, loose enough that a toll bridge with no
+ * alternative for fifty miles is still offered.
+ */
+const val TOLL_AVERSION: Double = 3.0
 
 /**
  * How far to look for a road, given how sure the device is about where it is.
@@ -222,7 +251,8 @@ class Router(
 
             graph.forEachOutgoing(junction) { nextIndex ->
                 val next = graph.edges[nextIndex]
-                val transition = junctionDelay + turnPenalty(edgeIndex, nextIndex)
+                val transition = junctionDelay + turnPenalty(edgeIndex, nextIndex) +
+                    tollEntryPenalty(edge, next)
 
                 // Arriving at a destination that sits mid-edge: pay only as far as the stop.
                 val goalOffset = goalOffsets[nextIndex]
@@ -290,7 +320,15 @@ class Router(
     private fun fullCost(edgeIndex: Int, lambdaSeconds: Double): Double =
         traffic.edgeSeconds[edgeIndex] +
             options.congestionAversion * traffic.edgeDelaySeconds[edgeIndex] +
+            tollCost(edgeIndex, 1.0) +
             lambdaSeconds * exposure.edgeWeight[edgeIndex]
+
+    /** What a toll road is charged beyond its driving time, for the fraction driven. */
+    private fun tollCost(edgeIndex: Int, fraction: Double): Double {
+        if (options.tollAversion <= 0.0) return 0.0
+        if (!graph.edges[edgeIndex].toll) return 0.0
+        return options.tollAversion * traffic.edgeSeconds[edgeIndex] * fraction
+    }
 
     /**
      * Cost of traversing part of an edge.
@@ -304,7 +342,8 @@ class Router(
         val span = (toMeters - fromMeters).coerceAtLeast(0.0)
         val fraction = if (edge.lengthMeters <= 0.0) 0.0 else (span / edge.lengthMeters).coerceIn(0.0, 1.0)
         val seconds = (traffic.edgeSeconds[edgeIndex] +
-            options.congestionAversion * traffic.edgeDelaySeconds[edgeIndex]) * fraction
+            options.congestionAversion * traffic.edgeDelaySeconds[edgeIndex]) * fraction +
+            tollCost(edgeIndex, fraction)
 
         if (lambdaSeconds <= 0.0) return seconds
 
@@ -314,6 +353,10 @@ class Router(
         }
         return seconds + lambdaSeconds * weight
     }
+
+    /** Charged once on joining a toll road, since any toll at all costs money. */
+    private fun tollEntryPenalty(from: RoadEdge, to: RoadEdge): Double =
+        if (options.tollAversion > 0.0 && to.toll && !from.toll) TOLL_ENTRY_SECONDS else 0.0
 
     /**
      * Seconds charged for the manoeuvre between two edges.

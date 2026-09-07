@@ -121,7 +121,16 @@ data class Route(
     val freeFlowSeconds: Double = durationSeconds,
     /** Where along the route congestion is expected, for colouring the line. */
     val congestionSpans: List<CongestionSpan> = emptyList(),
+    /**
+     * How much of the route runs on roads that charge.
+     *
+     * Reported whether or not tolls were being avoided, because a driver who did not ask to
+     * avoid them still deserves to know before setting off rather than at the barrier.
+     */
+    val tollMeters: Double = 0.0,
 ) {
+    val usesTolls: Boolean get() = tollMeters > 0.0
+
     /** The worst band anywhere on the route. */
     val heaviestCongestion: CongestionLevel
         get() = congestionSpans.maxByOrNull { it.level.ordinal }?.level ?: CongestionLevel.FREE

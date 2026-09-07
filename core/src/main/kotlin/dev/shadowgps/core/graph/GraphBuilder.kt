@@ -106,6 +106,10 @@ object GraphBuilder {
         val posted = Speeds.parseMaxspeedKph(tags["maxspeed"])
             ?: Speeds.parseMaxspeedKph(tags["maxspeed:forward"])
         val roundabout = tags["junction"].let { it == "roundabout" || it == "circular" }
+        // "toll=yes" is the common tagging; the motor_vehicle variant appears where the
+        // charge applies to cars but not to everything on the road. An hgv-only toll is
+        // deliberately ignored, since it costs a car nothing.
+        val toll = tags["toll"] == "yes" || tags["toll:motor_vehicle"] == "yes"
         val name = tags["name"]?.takeIf { it.isNotBlank() }
         val ref = tags["ref"]?.takeIf { it.isNotBlank() }
         val highway = tags["highway"] ?: "road"
@@ -149,6 +153,7 @@ object GraphBuilder {
                             ref = ref,
                             highway = highway,
                             roundabout = roundabout,
+                            toll = toll,
                             maxspeedKph = posted,
                         )
                         out.add(forward)
@@ -166,6 +171,7 @@ object GraphBuilder {
                             ref = ref,
                             highway = highway,
                             roundabout = roundabout,
+                            toll = toll,
                             maxspeedKph = posted,
                         )
                         out.add(backward)
