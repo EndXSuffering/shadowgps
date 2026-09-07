@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declares this app to Android Auto as a navigation app, which is what allows it to draw on
+  the car screen and take over turn-by-turn from whatever was there before.
+-->
+<automotiveApp>
+    <uses name="navigation" />
+</automotiveApp>

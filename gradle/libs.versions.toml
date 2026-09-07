@@ -10,6 +10,7 @@ lifecycle = "2.8.7"
 activityCompose = "1.9.3"
 datastore = "1.1.1"
 osmdroid = "6.1.20"
+carApp = "1.4.0"
 junit = "5.11.3"
 
 [libraries]
@@ -35,6 +36,7 @@ compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 
 osmdroid-android = { module = "org.osmdroid:osmdroid-android", version.ref = "osmdroid" }
+androidx-car-app-projected = { module = "androidx.car.app:app-projected", version.ref = "carApp" }
 
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 

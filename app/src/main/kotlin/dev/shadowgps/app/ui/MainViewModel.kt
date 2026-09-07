@@ -17,6 +17,7 @@ import dev.shadowgps.app.data.RegionStore
 import dev.shadowgps.app.data.SavedRegion
 import dev.shadowgps.app.data.SettingsStore
 import dev.shadowgps.app.location.LocationSource
+import dev.shadowgps.app.nav.CarNavState
 import dev.shadowgps.app.nav.NavigationBanner
 import dev.shadowgps.app.nav.NavigationHub
 import dev.shadowgps.app.nav.NavigationService
@@ -24,6 +25,7 @@ import dev.shadowgps.app.nav.Speaker
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.format.Formatting
+import dev.shadowgps.core.format.UnitSystem
 import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.geo.haversineMeters
@@ -265,6 +267,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 speedLimitKph = speedLimitAt(fix),
             )
         }
+        // Published before the early return so the car screen has a map to draw even when
+        // no trip is running — it shows the streets around the driver rather than nothing.
+        publishToCar()
         if (_state.value.phase != Phase.NAVIGATING) return
 
         // Still making our own way to a start the router could reach.
@@ -282,6 +287,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         announce(navigation)
         publishBanner(navigation)
+        publishToCar()
 
         if (navigation.isOffRoute) rerouteIfDue(fix)
         if (navigation.hasArrived) finishNavigation()
@@ -314,6 +320,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val graph = planner?.graph ?: return null
         val snap = graph.snapNearest(fix.position, SPEED_LIMIT_SNAP_METERS) ?: return null
         return graph.edges[snap.edgeIndex].maxspeedKph
+    }
+
+    /**
+     * Hands the car screen a snapshot of the trip.
+     *
+     * Published rather than shared, because the Android Auto screen is a separate component
+     * with no access to this view model and no business having any. It reads what it is
+     * given and draws it.
+     */
+    private fun publishToCar() {
+        val current = _state.value
+        NavigationHub.publishCar(
+            CarNavState(
+                graph = planner?.graph,
+                route = current.selectedRoute,
+                detectors = current.detectors,
+                vehiclePosition = current.navigation?.snappedPosition ?: current.userFix?.position,
+                vehicleHeadingDegrees = current.navigation?.routeHeadingDegrees
+                    ?: current.userFix?.bearingDegrees,
+                navigation = current.navigation.takeIf { current.phase == Phase.NAVIGATING },
+                destinationName = current.destination?.shortName,
+                imperial = current.settings.units == UnitSystem.IMPERIAL,
+            ),
+        )
     }
 
     private fun announce(navigation: NavigationState) {
@@ -653,6 +683,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectRoute(index: Int) {
         _state.update { it.copy(selectedRouteIndex = index.coerceIn(0, (it.routes.size - 1).coerceAtLeast(0))) }
+        publishToCar()
     }
 
     /**
@@ -753,6 +784,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         NavigationHub.publish(NavigationBanner(route.steps.firstOrNull()?.instruction ?: "Navigating", ""))
         NavigationService.start(getApplication())
+        publishToCar()
 
         _state.value.userFix?.let(::onFix)
     }
@@ -924,6 +956,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 tripSummary = summary,
             )
         }
+        publishToCar()
     }
 
     fun dismissTripSummary() = _state.update { it.copy(tripSummary = null) }
