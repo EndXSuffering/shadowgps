@@ -10,6 +10,8 @@ import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.geo.METERS_PER_DEGREE_LAT
 import dev.shadowgps.core.geo.coordsCount
 import dev.shadowgps.core.geo.metersPerDegreeLon
+import dev.shadowgps.core.nav.FollowFraming
+import dev.shadowgps.core.nav.followFraming
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -42,6 +44,9 @@ class CarMapRenderer {
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     private val path = Path()
+
+    /** The framing the last frame settled on; carried so the bands keep their hysteresis. */
+    private var framing = FollowFraming.CRUISING
 
     fun draw(
         canvas: Canvas,
@@ -79,20 +84,20 @@ class CarMapRenderer {
     /**
      * How much ground fits on the screen.
      *
-     * Closes in near a manoeuvre and pulls back out afterwards, for the same reason the phone
-     * map does: a view wide enough to show the road ahead is too wide to show which lane
-     * peels off at an exit.
+     * Closes in near a manoeuvre and pulls back out afterwards, off the same decision the
+     * phone map uses so the two screens agree about when a turn is close — a driver
+     * glancing between them should not be looking at two different opinions.
      *
      * Divided by the screen density so a high-dpi head unit shows the same amount of road as
      * a low-dpi one rather than the same number of pixels — a car screen may be anything from
      * 120 to 320 dpi, and a fixed metres-per-pixel would be a different map on each.
      */
     private fun metersPerPixelFor(state: CarNavState, scale: Float): Double {
-        val toManeuver = state.navigation?.distanceToManeuverMeters ?: Double.MAX_VALUE
-        val base = if (toManeuver < NEAR_TURN_METERS) {
-            NEAR_TURN_METERS_PER_PIXEL
-        } else {
-            CRUISING_METERS_PER_PIXEL
+        framing = followFraming(state.navigation?.distanceToManeuverMeters, framing)
+        val base = when (framing) {
+            FollowFraming.CRUISING -> CRUISING_METERS_PER_PIXEL
+            FollowFraming.APPROACHING -> APPROACH_METERS_PER_PIXEL
+            FollowFraming.AT_MANEUVER -> NEAR_TURN_METERS_PER_PIXEL
         }
         return base / scale
     }
@@ -217,11 +222,12 @@ class CarMapRenderer {
         const val WATCHED = 0xFFF87171.toInt()
 
         const val VEHICLE_SCREEN_POSITION = 0.72f
-        /** Close enough to a turn that the junction matters more than the road ahead. */
-        const val NEAR_TURN_METERS = 200.0
 
+        // Roughly halving at each step, which is what the phone map's whole-zoom-level
+        // steps come to.
         const val CRUISING_METERS_PER_PIXEL = 3.2
-        const val NEAR_TURN_METERS_PER_PIXEL = 1.1
+        const val APPROACH_METERS_PER_PIXEL = 1.8
+        const val NEAR_TURN_METERS_PER_PIXEL = 0.9
     }
 }
 

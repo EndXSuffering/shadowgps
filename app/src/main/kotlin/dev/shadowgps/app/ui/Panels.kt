@@ -71,6 +71,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -137,6 +138,16 @@ fun SearchPanel(
     modifier: Modifier = Modifier,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // Choosing somewhere is the end of typing. Doing this here rather than leaving it to the
+    // phase change means the keyboard drops on the tap itself, so the map is already visible
+    // while the download runs instead of appearing once it finishes.
+    val pick: (Place) -> Unit = { place ->
+        keyboard?.hide()
+        focusManager.clearFocus(force = true)
+        onPick(place)
+    }
 
     Column(modifier = modifier) {
         Surface(
@@ -251,7 +262,7 @@ fun SearchPanel(
                                     },
                                     icon = Icons.Rounded.Place,
                                     starred = starredKeys.contains(placeKey(place)),
-                                    onClick = { onPick(place) },
+                                    onClick = { pick(place) },
                                     onStar = { onStar(place, !starredKeys.contains(placeKey(place))) },
                                 )
                             }
@@ -270,7 +281,7 @@ fun SearchPanel(
                                         distance = null,
                                         icon = Icons.Rounded.Star,
                                         starred = true,
-                                        onClick = { onPick(saved.place) },
+                                        onClick = { pick(saved.place) },
                                         onStar = { onStar(saved.place, false) },
                                     )
                                 }
@@ -285,7 +296,7 @@ fun SearchPanel(
                                         distance = null,
                                         icon = Icons.Rounded.History,
                                         starred = false,
-                                        onClick = { onPick(recent.place) },
+                                        onClick = { pick(recent.place) },
                                         onStar = { onStar(recent.place, true) },
                                     )
                                 }

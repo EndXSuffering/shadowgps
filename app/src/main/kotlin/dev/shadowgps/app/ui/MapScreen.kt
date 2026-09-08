@@ -40,6 +40,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -94,6 +96,21 @@ fun MapScreen(viewModel: MainViewModel) {
             state.phase == Phase.CHOOSING -> viewModel.clearDestination()
             state.query.isNotEmpty() -> viewModel.clearSearch()
             else -> viewModel.resetTrip()
+        }
+    }
+
+    // Once the driver has stopped typing and started going somewhere, the keyboard is half
+    // the screen of nothing. It used to sit there through the map download, through the
+    // route search and into the route list, hiding the very things it was covering.
+    // Anything that is not browsing is past the point of typing, so it goes.
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(state.phase) {
+        if (state.phase != Phase.BROWSING) {
+            keyboard?.hide()
+            // Hiding the IME alone leaves the field focused, and the keyboard springs back
+            // the moment anything else asks for focus.
+            focusManager.clearFocus(force = true)
         }
     }
 

@@ -36,7 +36,9 @@ import dev.shadowgps.core.geo.coordsToList
 import dev.shadowgps.core.geo.destinationPoint
 import dev.shadowgps.core.geo.listToCoords
 import dev.shadowgps.core.geo.sliceCoords
+import dev.shadowgps.core.nav.FollowFraming
 import dev.shadowgps.core.nav.PositionFix
+import dev.shadowgps.core.nav.followFraming
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.traffic.CongestionLevel
 import org.osmdroid.events.MapEventsReceiver
@@ -249,6 +251,11 @@ fun MapCanvas(
     // middle of the ocean. Move to the driver once, the first time we know where they are.
     val centredOnUser = remember { mutableStateOf(false) }
 
+    // The framing the map was last told to take up, which is what makes "the band changed"
+    // an event rather than a comparison against the live zoom — the live zoom can be
+    // anywhere while an animation is still running towards the target.
+    val framing = remember { mutableStateOf(FollowFraming.CRUISING) }
+
     // The hot path: one marker moves, nothing is rebuilt. Keyed on the distance to the next
     // manoeuvre as well as on position, so closing in for a turn does not have to wait for
     // the driver to move far enough to produce a different fix.
@@ -274,29 +281,47 @@ fun MapCanvas(
         heading?.let { vehicle.rotation = -it.toFloat() }
 
         if (followUser) {
-            mapView.controller.animateTo(vehicle.position)
-            // Rotating the map to the heading is what makes a turn instruction read
-            // correctly at a junction.
-            heading?.let { mapView.mapOrientation = -it.toFloat() }
-
-            val wanted = followZoom(metersToManeuver, zoomForTurns)
-            if (wanted == null) {
-                // Turn zoom switched off: the driver keeps whatever zoom they chose, and
-                // the map only intervenes when it is too far out to be any use at all.
+            if (!zoomForTurns) {
+                // Switched off: the driver keeps whatever zoom they chose, and the map only
+                // intervenes when it is too far out to follow a road by at all.
+                framing.value = FollowFraming.CRUISING
+                mapView.controller.animateTo(vehicle.position, null, PAN_MILLIS)
                 if (mapView.zoomLevelDouble < MINIMUM_USEFUL_ZOOM) {
                     mapView.controller.setZoom(CRUISING_ZOOM)
                 }
-            } else if (abs(mapView.zoomLevelDouble - wanted) > ZOOM_DEADBAND) {
-                // Set rather than animate, and this is not a stylistic choice. osmdroid's
-                // animated zoom gives up silently while any other animation is running —
-                // and the pan to the vehicle, one line above, is running on every fix. Every
-                // animated zoom was therefore being dropped: the map never closed in for a
-                // turn, and never came back from the whole-route framing after Start, which
-                // is why it sat so far out.
-                mapView.controller.setZoom(wanted)
+            } else {
+                val wanted = followFraming(metersToManeuver, framing.value)
+                val zoom = zoomFor(wanted)
+                if (wanted != framing.value) {
+                    framing.value = wanted
+                    // Centre and zoom in one animation, which is the only way osmdroid will
+                    // reliably do both. Its standalone animated zoom refuses outright while
+                    // another animation is running — and the pan to the vehicle is running
+                    // on every fix, so every zoom was being dropped. Its instant setZoom
+                    // does land, but a jump between frames is easy to miss from the
+                    // driver's seat, which is what "I'm not noticing it" was describing.
+                    // Handing both to one animator gives visible motion and no contention.
+                    mapView.controller.animateTo(vehicle.position, zoom, ZOOM_MILLIS)
+                } else {
+                    mapView.controller.animateTo(vehicle.position, null, PAN_MILLIS)
+                    // A fix arriving mid-animation cancels it wherever it had got to, so
+                    // the band can be settled while the zoom is still short of its target.
+                    // Close the remainder outright rather than waiting for another band
+                    // change that may never come.
+                    if (abs(mapView.zoomLevelDouble - zoom) > ZOOM_DEADBAND) {
+                        mapView.controller.setZoom(zoom)
+                    }
+                }
             }
-        } else if (mapView.mapOrientation != 0f) {
-            mapView.mapOrientation = 0f
+            // Rotating the map to the heading is what makes a turn instruction read
+            // correctly at a junction.
+            heading?.let { mapView.mapOrientation = -it.toFloat() }
+        } else {
+            // Not following any more — end of a trip, or the driver stepped back for the
+            // overview. Forget the framing, so the next trip is not judged against a band
+            // left over from the last one.
+            framing.value = FollowFraming.CRUISING
+            if (mapView.mapOrientation != 0f) mapView.mapOrientation = 0f
         }
         mapView.invalidate()
     }
@@ -364,37 +389,41 @@ private fun visibleBox(map: MapView): GeoBox? {
 }
 
 /**
- * How close in to sit while following, given how near the next manoeuvre is.
+ * What each framing is worth in osmdroid zoom levels.
  *
- * A view wide enough to show the road ahead is too wide to show which of three lanes peels
- * off at an exit, and the moment that detail matters is the last few hundred metres. Two
- * steps rather than a continuous ramp, because a zoom that creeps constantly is more
+ * A whole level between each, because a level is a doubling of the scale and anything less
+ * than that is a change the driver has to go looking for rather than one they see happen.
+ * Three fixed steps rather than a continuous ramp: a zoom that creeps constantly is more
  * distracting than one that changes twice and settles.
  */
-private fun followZoom(metersToManeuver: Double?, enabled: Boolean): Double? {
-    // Null means "leave the zoom alone", which is what the driver gets when they have
-    // turned the feature off — taking their chosen zoom away would be its own annoyance.
-    if (!enabled) return null
-    if (metersToManeuver == null) return CRUISING_ZOOM
-    return when {
-        metersToManeuver <= MANEUVER_CLOSE_METERS -> MANEUVER_ZOOM
-        metersToManeuver <= MANEUVER_APPROACH_METERS -> APPROACH_ZOOM
-        else -> CRUISING_ZOOM
-    }
+private fun zoomFor(framing: FollowFraming): Double = when (framing) {
+    FollowFraming.CRUISING -> CRUISING_ZOOM
+    FollowFraming.APPROACHING -> APPROACH_ZOOM
+    FollowFraming.AT_MANEUVER -> MANEUVER_ZOOM
 }
 
 private const val CRUISING_ZOOM = 17.0
 private const val APPROACH_ZOOM = 18.0
-private const val MANEUVER_ZOOM = 18.8
-
-/** Far enough out that a motorway exit is still several seconds away. */
-private const val MANEUVER_APPROACH_METERS = 400.0
-
-/** Close enough that the junction itself is what matters. */
-private const val MANEUVER_CLOSE_METERS = 120.0
+private const val MANEUVER_ZOOM = 19.0
 
 /** Ignore differences smaller than this, so a driver's own pinch is not fought. */
 private const val ZOOM_DEADBAND = 0.35
+
+/**
+ * How long the map takes to move between framings.
+ *
+ * Long enough to read as a deliberate move rather than a glitch, short enough to finish
+ * before the next fix arrives and cancels it.
+ */
+private const val ZOOM_MILLIS = 650L
+
+/**
+ * How long the map takes to catch up with the vehicle between framings.
+ *
+ * osmdroid's default is a full second, which is about how often fixes arrive, so the pan was
+ * permanently mid-flight and the vehicle permanently a beat behind where it really was.
+ */
+private const val PAN_MILLIS = 600L
 
 /** Below this the map is too far out to follow a road by, whatever the driver chose. */
 private const val MINIMUM_USEFUL_ZOOM = 16.0
