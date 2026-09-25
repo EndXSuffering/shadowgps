@@ -46,7 +46,14 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Google removed the obsolete "tools" package from the SDK repository, and this
+      # action installs it by default, so the default now fails outright with "Failed to
+      # find package 'tools'". The runner image already ships platform-tools and the
+      # command-line tools; all this step still needs to do is accept the licences and
+      # export ANDROID_HOME, which it does with nothing to install.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
 
       - uses: gradle/actions/setup-gradle@v4
 
