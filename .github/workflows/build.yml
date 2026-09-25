@@ -72,6 +72,32 @@ jobs:
           echo "--- $manifest"
           cat "$manifest"
 
+      # A car service that silently failed to merge would look exactly like Android Auto
+      # refusing to list the app, and the two want completely different fixes. Reading the
+      # dump above by eye is how that distinction gets lost, so assert it instead.
+      - name: Check the car services survived the merge
+        run: |
+          set -eu
+          manifest=$(find app/build/intermediates -name AndroidManifest.xml -path '*debug*'             -not -path '*aapt*' -not -path '*navigation*' | head -1)
+          missing=0
+          for entry in \
+            "dev.shadowgps.app.car.ShadowCarAppService" \
+            "dev.shadowgps.app.car.PoiProbeCarAppService" \
+            "androidx.car.app.CarAppService" \
+            "androidx.car.app.category.NAVIGATION" \
+            "androidx.car.app.category.POI" \
+            "androidx.car.app.minCarApiLevel" \
+            "com.google.android.gms.car.application"
+          do
+            if grep -q -- "$entry" "$manifest"; then
+              echo "ok      $entry"
+            else
+              echo "MISSING $entry"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Lint
         run: ./gradlew :app:lintDebug
 
