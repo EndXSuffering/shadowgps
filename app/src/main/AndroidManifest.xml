@@ -14,6 +14,9 @@
          car screen rather than handing the host a list of cards. -->
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+    <!-- For the point-of-interest probe service below, which is not allowed the navigation
+         templates and so draws with the map/content ones instead. -->
+    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
 
     <uses-feature
         android:name="android.hardware.location.gps"
@@ -59,6 +62,7 @@
 
         <service
             android:name=".car.ShadowCarAppService"
+            android:label="@string/car_app_name"
             android:exported="true">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
@@ -72,6 +76,27 @@
                 <action android:name="androidx.car.app.action.NAVIGATE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="geo" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Diagnostic, to be removed once it has answered its question.
+
+          Android Auto lists neither Waze's nor Maps' problem: ShadowGPS is absent from
+          Customize launcher altogether, and the merged manifest that CI prints shows nothing
+          wrong with how the navigation service above is declared. Registering the same app a
+          second time under the point-of-interest category — which has none of the navigation
+          category's rules about where an app was installed from — separates "the host never
+          sees this app" from "the host sees it and will not list a sideloaded navigation
+          app". Whichever entry turns up in the launcher is the answer.
+        -->
+        <service
+            android:name=".car.PoiProbeCarAppService"
+            android:label="@string/car_poi_probe_name"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.POI" />
             </intent-filter>
         </service>
 

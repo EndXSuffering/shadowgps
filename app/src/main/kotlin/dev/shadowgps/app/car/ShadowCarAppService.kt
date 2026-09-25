@@ -1,5 +1,6 @@
 package dev.shadowgps.app.car
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import androidx.car.app.CarAppService
@@ -17,32 +18,36 @@ import androidx.car.app.validation.HostValidator
  */
 class ShadowCarAppService : CarAppService() {
 
-    /**
-     * Which hosts may drive this app.
-     *
-     * A debug build trusts anything, because that is the only way a sideloaded APK can be
-     * opened by Android Auto's own developer mode — which is how this gets tested at all. A
-     * release build trusts only the hosts the library itself vouches for, since a permissive
-     * validator in a shipped app is an invitation to anything on the device that fancies
-     * driving the navigation screen.
-     *
-     * That release branch leans on a resource the library marks private, which lint rightly
-     * grumbles about: it could vanish in a future version. It is the allowlist Google's own
-     * sample uses and there is no public equivalent, so the honest options are this or
-     * hard-coding host signature digests that would rot just as fast. Worth revisiting if
-     * this is ever actually shipped, which would need a driver-distraction review anyway.
-     */
-    override fun createHostValidator(): HostValidator =
-        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            HostValidator.ALLOW_ALL_HOSTS_VALIDATOR
-        } else {
-            HostValidator.Builder(applicationContext)
-                .addAllowedHosts(androidx.car.app.R.array.hosts_allowlist_sample)
-                .build()
-        }
+    override fun createHostValidator(): HostValidator = carHostValidator(this)
 
     override fun onCreateSession(): Session = ShadowSession()
 }
+
+/**
+ * Which hosts may drive this app.
+ *
+ * A debug build trusts anything, because that is the only way a sideloaded APK can be
+ * opened by Android Auto's own developer mode — which is how this gets tested at all. A
+ * release build trusts only the hosts the library itself vouches for, since a permissive
+ * validator in a shipped app is an invitation to anything on the device that fancies
+ * driving the navigation screen.
+ *
+ * That release branch leans on a resource the library marks private, which lint rightly
+ * grumbles about: it could vanish in a future version. It is the allowlist Google's own
+ * sample uses and there is no public equivalent, so the honest options are this or
+ * hard-coding host signature digests that would rot just as fast. Worth revisiting if
+ * this is ever actually shipped, which would need a driver-distraction review anyway.
+ *
+ * Shared by both car services so a probe cannot accidentally be laxer than the real one.
+ */
+fun carHostValidator(context: Context): HostValidator =
+    if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+        HostValidator.ALLOW_ALL_HOSTS_VALIDATOR
+    } else {
+        HostValidator.Builder(context.applicationContext)
+            .addAllowedHosts(androidx.car.app.R.array.hosts_allowlist_sample)
+            .build()
+    }
 
 /** One connection to the car. Lives as long as the head unit is showing this app. */
 class ShadowSession : Session() {

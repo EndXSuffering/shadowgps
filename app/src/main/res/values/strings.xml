@@ -6,4 +6,9 @@
     <string name="nav_channel_description">Shows the next instruction while you are driving.</string>
     <string name="nav_notification_title">Navigating</string>
     <string name="nav_stop">Stop</string>
+
+    <!-- Labels for the two car services, so Android Auto's launcher list can tell them
+         apart while we work out which of them it is willing to show. -->
+    <string name="car_app_name">ShadowGPS</string>
+    <string name="car_poi_probe_name">ShadowGPS POI probe</string>
 </resources>
