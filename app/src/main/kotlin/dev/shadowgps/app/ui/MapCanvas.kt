@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
@@ -36,9 +37,18 @@ import dev.shadowgps.core.geo.coordsToList
 import dev.shadowgps.core.geo.destinationPoint
 import dev.shadowgps.core.geo.listToCoords
 import dev.shadowgps.core.geo.sliceCoords
+import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.nav.FollowFraming
+import dev.shadowgps.core.nav.HEADING_TIME_CONSTANT_SECONDS
+import dev.shadowgps.core.nav.POSITION_TIME_CONSTANT_SECONDS
 import dev.shadowgps.core.nav.PositionFix
+import dev.shadowgps.core.nav.SNAP_DISTANCE_METERS
+import dev.shadowgps.core.nav.ZOOM_TIME_CONSTANT_SECONDS
+import dev.shadowgps.core.nav.approachBearing
+import dev.shadowgps.core.nav.approachPosition
+import dev.shadowgps.core.nav.approachValue
 import dev.shadowgps.core.nav.followFraming
+import dev.shadowgps.core.nav.smoothingFactor
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.traffic.CongestionLevel
 import org.osmdroid.events.MapEventsReceiver
@@ -92,6 +102,10 @@ fun MapCanvas(
     /** Metres to the next manoeuvre, for closing in on it. Null when not navigating. */
     metersToManeuver: Double?,
     zoomForTurns: Boolean,
+    /** Devices the chosen route goes past, which are the ones that will actually see the car. */
+    routeDetectorIds: Set<String>,
+    /** Those of them already behind the driver. */
+    passedDetectorIds: Set<String>,
     onLongPress: (LatLon) -> Unit,
     onDetectorTapped: (Detector) -> Unit,
     onViewportChanged: (GeoBox) -> Unit,
@@ -209,13 +223,28 @@ fun MapCanvas(
         mapView.invalidate()
     }
 
-    LaunchedEffect(detectors, showDetectorRanges) {
+    /*
+     * The surveillance layer.
+     *
+     * Devices the chosen route actually passes are drawn differently from ones that merely
+     * happen to be nearby, because while driving those are the only ones that are going to
+     * see the car. One still ahead gets its coverage drawn whatever the setting says — the
+     * shape is what shows which way it looks and how far, and that is the thing worth
+     * knowing in the seconds before driving into it. One already behind is greyed rather
+     * than removed, so the map still reads as a record of what has seen you.
+     *
+     * Keyed on the two id sets as well as the list. Both are rebuilt on every fix, but a
+     * set compares by content, so this only re-runs when a camera is actually passed.
+     */
+    LaunchedEffect(detectors, showDetectorRanges, routeDetectorIds, passedDetectorIds) {
         detectorLayer.items.clear()
         for (detector in detectors) {
-            if (showDetectorRanges) {
-                detectorLayer.items.add(coverageShape(mapView, detector))
+            val onRoute = detector.id in routeDetectorIds
+            val passed = detector.id in passedDetectorIds
+            if (showDetectorRanges || (onRoute && !passed)) {
+                detectorLayer.items.add(coverageShape(mapView, detector, passed))
             }
-            detectorLayer.items.add(detectorMarker(mapView, detector, onDetectorTapped))
+            detectorLayer.items.add(detectorMarker(mapView, detector, onRoute, passed, onDetectorTapped))
         }
         mapView.invalidate()
     }
@@ -252,78 +281,167 @@ fun MapCanvas(
     val centredOnUser = remember { mutableStateOf(false) }
 
     // The framing the map was last told to take up, which is what makes "the band changed"
-    // an event rather than a comparison against the live zoom — the live zoom can be
-    // anywhere while an animation is still running towards the target.
+    // an event rather than a comparison against the live zoom.
     val framing = remember { mutableStateOf(FollowFraming.CRUISING) }
 
-    // The hot path: one marker moves, nothing is rebuilt. Keyed on the distance to the next
-    // manoeuvre as well as on position, so closing in for a turn does not have to wait for
-    // the driver to move far enough to produce a different fix.
-    LaunchedEffect(userFix, vehiclePosition, vehicleHeadingDegrees, followUser, metersToManeuver) {
-        // Prefer the route-matched position; fall back to the raw fix when not navigating.
-        val shown = vehiclePosition ?: userFix?.position ?: return@LaunchedEffect
-        // A GPS bearing is meaningless below walking pace and absent on many fixes, which
-        // is why the arrow used to spin on the spot at every red light.
-        val heading = vehicleHeadingDegrees
-            ?: userFix?.bearingDegrees?.takeIf { (userFix.speedMetersPerSecond ?: 0.0) > 1.5 }
+    // Where the fixes say things are. Read by the frame loop below without restarting it,
+    // so a new fix changes where the map is heading rather than interrupting how it gets
+    // there.
+    val targetPosition = rememberUpdatedState(vehiclePosition ?: userFix?.position)
+    // A GPS bearing is meaningless below walking pace and absent on many fixes, which is
+    // why the arrow used to spin on the spot at every red light.
+    val targetHeading = rememberUpdatedState(
+        vehicleHeadingDegrees
+            ?: userFix?.bearingDegrees?.takeIf { (userFix.speedMetersPerSecond ?: 0.0) > 1.5 },
+    )
+    val following = rememberUpdatedState(followUser)
+    val turnZoom = rememberUpdatedState(zoomForTurns)
+    val maneuverDistance = rememberUpdatedState(metersToManeuver)
 
-        if (!centredOnUser.value) {
-            centredOnUser.value = true
-            mapView.controller.setZoom(16.0)
-            mapView.controller.setCenter(GeoPoint(shown.lat, shown.lon))
-            // setCenter does not always emit a scroll event, and this is the jump that
-            // first brings the driver's own surroundings into view — the cameras that
-            // matter most. Report it directly rather than hoping for a callback.
-            viewportRequest.value = visibleBox(mapView)
-        }
+    // The first fix, which is a jump rather than a journey: it brings the driver's own
+    // surroundings into view, and the cameras around them with it.
+    LaunchedEffect(targetPosition.value != null) {
+        val shown = targetPosition.value ?: return@LaunchedEffect
+        if (centredOnUser.value) return@LaunchedEffect
+        centredOnUser.value = true
+        mapView.controller.setZoom(16.0)
+        mapView.controller.setCenter(GeoPoint(shown.lat, shown.lon))
+        // setCenter does not always emit a scroll event, and this is the jump that first
+        // brings the cameras that matter most into range. Report it directly rather than
+        // hoping for a callback.
+        viewportRequest.value = visibleBox(mapView)
+    }
 
-        vehicle.position = GeoPoint(shown.lat, shown.lon)
-        heading?.let { vehicle.rotation = -it.toFloat() }
+    /*
+     * The camera, driven one frame at a time.
+     *
+     * Everything that moves — the vehicle, the map centre, the rotation, the zoom — is
+     * stepped here and nowhere else. That single ownership is the point. Fixes land about
+     * once a second, so anything driven straight off a fix moves once a second: the arrow
+     * hopped a car's length at a time and the map snapped to each new heading, which is
+     * exactly when a driver loses track of where they are on the road.
+     *
+     * It also ends a fight. osmdroid's animations were previously being asked to pan on
+     * every fix and to zoom on every band change, and its animator cancels whatever was
+     * running when a new one starts — so a zoom begun on one fix was routinely killed by
+     * the pan on the next, part-way there. Nothing here animates: each frame computes where
+     * things should be and puts them there, so there is nothing left to interrupt.
+     */
+    LaunchedEffect(mapView) {
+        var shownPosition: LatLon? = null
+        var shownHeading: Double? = null
+        var shownZoom = mapView.zoomLevelDouble
+        var appliedZoom = shownZoom
+        var lastFrameNanos = 0L
+        // Taking over from a driver who was panning around needs one unconditional centring,
+        // because by then the vehicle may already be sitting exactly where the fix says.
+        var wasFollowing = false
 
-        if (followUser) {
-            if (!zoomForTurns) {
-                // Switched off: the driver keeps whatever zoom they chose, and the map only
-                // intervenes when it is too far out to follow a road by at all.
-                framing.value = FollowFraming.CRUISING
-                mapView.controller.animateTo(vehicle.position, null, PAN_MILLIS)
-                if (mapView.zoomLevelDouble < MINIMUM_USEFUL_ZOOM) {
-                    mapView.controller.setZoom(CRUISING_ZOOM)
-                }
-            } else {
-                val wanted = followFraming(metersToManeuver, framing.value)
-                val zoom = zoomFor(wanted)
-                if (wanted != framing.value) {
-                    framing.value = wanted
-                    // Centre and zoom in one animation, which is the only way osmdroid will
-                    // reliably do both. Its standalone animated zoom refuses outright while
-                    // another animation is running — and the pan to the vehicle is running
-                    // on every fix, so every zoom was being dropped. Its instant setZoom
-                    // does land, but a jump between frames is easy to miss from the
-                    // driver's seat, which is what "I'm not noticing it" was describing.
-                    // Handing both to one animator gives visible motion and no contention.
-                    mapView.controller.animateTo(vehicle.position, zoom, ZOOM_MILLIS)
+        while (true) {
+            val frameNanos = withFrameNanos { it }
+            val elapsed = if (lastFrameNanos == 0L) 0.0 else (frameNanos - lastFrameNanos) / 1e9
+            lastFrameNanos = frameNanos
+
+            val wantedPosition = targetPosition.value ?: continue
+            var moved = false
+
+            // A reroute or a reacquired fix can move the vehicle kilometres at once, and
+            // sliding smoothly across all of it would be a long animation of the map
+            // flying over countryside. Land on the answer instead.
+            val here = shownPosition
+            val nextPosition = when {
+                here == null -> wantedPosition
+                haversineMeters(here, wantedPosition) > SNAP_DISTANCE_METERS -> wantedPosition
+                else -> approachPosition(
+                    here,
+                    wantedPosition,
+                    smoothingFactor(elapsed, POSITION_TIME_CONSTANT_SECONDS),
+                )
+            }
+            shownPosition = nextPosition
+
+            val facing = shownHeading
+            val nextHeading = targetHeading.value?.let { wantedHeading ->
+                if (facing == null) {
+                    wantedHeading
                 } else {
-                    mapView.controller.animateTo(vehicle.position, null, PAN_MILLIS)
-                    // A fix arriving mid-animation cancels it wherever it had got to, so
-                    // the band can be settled while the zoom is still short of its target.
-                    // Close the remainder outright rather than waiting for another band
-                    // change that may never come.
-                    if (abs(mapView.zoomLevelDouble - zoom) > ZOOM_DEADBAND) {
-                        mapView.controller.setZoom(zoom)
-                    }
+                    approachBearing(
+                        facing,
+                        wantedHeading,
+                        smoothingFactor(elapsed, HEADING_TIME_CONSTANT_SECONDS),
+                    )
+                }
+            } ?: facing
+            shownHeading = nextHeading
+
+            val drawnPosition = GeoPoint(nextPosition.lat, nextPosition.lon)
+            val positionChanged = vehicle.position != drawnPosition
+            if (positionChanged) {
+                vehicle.position = drawnPosition
+                moved = true
+            }
+            val rotation = nextHeading?.let { -it.toFloat() }
+            if (rotation != null && vehicle.rotation != rotation) {
+                vehicle.rotation = rotation
+                moved = true
+            }
+
+            if (following.value) {
+                // Only when it actually moved. Parked with guidance running, the smoothed
+                // position converges on the fix and stops changing, and from then on this
+                // whole loop does nothing at all — which is the difference between a map
+                // that idles and one that redraws sixty times a second on a driveway.
+                if (positionChanged || !wasFollowing) {
+                    mapView.setExpectedCenter(drawnPosition)
+                    moved = true
+                }
+                // Rotating the map to the heading is what makes a turn instruction read
+                // correctly at a junction.
+                if (rotation != null && mapView.mapOrientation != rotation) {
+                    mapView.mapOrientation = rotation
+                    moved = true
+                }
+
+                val wantedZoom = if (turnZoom.value) {
+                    val wanted = followFraming(maneuverDistance.value, framing.value)
+                    framing.value = wanted
+                    zoomFor(wanted)
+                } else {
+                    // Switched off: the driver keeps whatever zoom they chose, and the map
+                    // only intervenes when it is too far out to follow a road by at all.
+                    framing.value = FollowFraming.CRUISING
+                    if (shownZoom < MINIMUM_USEFUL_ZOOM) CRUISING_ZOOM else shownZoom
+                }
+                shownZoom = approachValue(
+                    shownZoom,
+                    wantedZoom,
+                    smoothingFactor(elapsed, ZOOM_TIME_CONSTANT_SECONDS),
+                )
+                // Every zoom change rescales the tile cache, so a frame that would not
+                // visibly differ is a frame's work thrown away. In the steady state
+                // between manoeuvres this skips every time.
+                if (abs(shownZoom - appliedZoom) > ZOOM_STEP_THRESHOLD) {
+                    appliedZoom = shownZoom
+                    mapView.controller.setZoom(shownZoom)
+                    moved = true
+                }
+                wasFollowing = true
+            } else {
+                // Not following — browsing, or stepped back for the overview. Leave the
+                // map where the driver put it, and forget the framing so the next trip is
+                // not judged against a band left over from the last one.
+                framing.value = FollowFraming.CRUISING
+                shownZoom = mapView.zoomLevelDouble
+                appliedZoom = shownZoom
+                wasFollowing = false
+                if (mapView.mapOrientation != 0f) {
+                    mapView.mapOrientation = 0f
+                    moved = true
                 }
             }
-            // Rotating the map to the heading is what makes a turn instruction read
-            // correctly at a junction.
-            heading?.let { mapView.mapOrientation = -it.toFloat() }
-        } else {
-            // Not following any more — end of a trip, or the driver stepped back for the
-            // overview. Forget the framing, so the next trip is not judged against a band
-            // left over from the last one.
-            framing.value = FollowFraming.CRUISING
-            if (mapView.mapOrientation != 0f) mapView.mapOrientation = 0f
+
+            if (moved) mapView.invalidate()
         }
-        mapView.invalidate()
     }
 
     // Stepping back to see the whole route mid-drive, and returning to the driver after.
@@ -351,16 +469,28 @@ fun MapCanvas(
         }
     }
 
-    // Acts on where the map settled rather than where it passed through, and skips a
-    // reload when the new view is inside one already fetched — panning within an area
-    // whose cameras are on screen needs nothing.
+    /*
+     * Fetches the camera layer for wherever the map currently is.
+     *
+     * Samples on a timer rather than debouncing the map's own movement events, and that is
+     * not a detail. The camera now moves every frame while following a driver, so the map
+     * emits a scroll event sixty times a second — and a debounce that restarts on every
+     * event never fires at all while the car is moving, which is precisely when the layer
+     * needs loading. A sampler cannot be starved: it looks at wherever the map has got to,
+     * on a cadence of its own.
+     *
+     * Still skips a reload when the new view sits inside one already fetched, so panning
+     * around an area whose cameras are already on screen costs nothing.
+     */
     var lastLoaded by remember { mutableStateOf<GeoBox?>(null) }
-    LaunchedEffect(viewportRequest.value) {
-        val box = viewportRequest.value ?: return@LaunchedEffect
-        delay(VIEWPORT_DEBOUNCE_MILLIS)
-        if (lastLoaded?.contains(box) == true) return@LaunchedEffect
-        lastLoaded = box
-        reportViewport.value(box)
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(VIEWPORT_SAMPLE_MILLIS)
+            val box = viewportRequest.value ?: continue
+            if (lastLoaded?.contains(box) == true) continue
+            lastLoaded = box
+            reportViewport.value(box)
+        }
     }
 
     // Explicit "take me back to where I am", separate from follow mode so it also works
@@ -406,30 +536,20 @@ private const val CRUISING_ZOOM = 17.0
 private const val APPROACH_ZOOM = 18.0
 private const val MANEUVER_ZOOM = 19.0
 
-/** Ignore differences smaller than this, so a driver's own pinch is not fought. */
-private const val ZOOM_DEADBAND = 0.35
-
 /**
- * How long the map takes to move between framings.
+ * Zoom changes smaller than this are not worth applying.
  *
- * Long enough to read as a deliberate move rather than a glitch, short enough to finish
- * before the next fix arrives and cancels it.
+ * Setting a zoom level rescales the tile cache, which is real work, and the frame loop
+ * offers one a frame. Below this the result would not differ by a pixel, so the steady
+ * state between manoeuvres costs nothing at all.
  */
-private const val ZOOM_MILLIS = 650L
-
-/**
- * How long the map takes to catch up with the vehicle between framings.
- *
- * osmdroid's default is a full second, which is about how often fixes arrive, so the pan was
- * permanently mid-flight and the vehicle permanently a beat behind where it really was.
- */
-private const val PAN_MILLIS = 600L
+private const val ZOOM_STEP_THRESHOLD = 0.01
 
 /** Below this the map is too far out to follow a road by, whatever the driver chose. */
 private const val MINIMUM_USEFUL_ZOOM = 16.0
 
-/** Settling time after the last map movement before the camera layer is fetched. */
-private const val VIEWPORT_DEBOUNCE_MILLIS = 400L
+/** How often the map is asked where it has got to, for loading the camera layer. */
+private const val VIEWPORT_SAMPLE_MILLIS = 700L
 
 /**
  * Where down the screen the vehicle sits while being followed, as a fraction of the height.
@@ -538,8 +658,8 @@ private fun congestionLines(map: MapView, route: Route): List<Polyline> {
  * Cameras with a mapped facing direction get a wedge showing where they actually look;
  * ones without get a full circle, matching how the router treats them.
  */
-private fun coverageShape(map: MapView, detector: Detector): Polygon {
-    val tint = colorFor(detector.kind)
+private fun coverageShape(map: MapView, detector: Detector, passed: Boolean = false): Polygon {
+    val tint = if (passed) ShadowColors.TextSecondary else colorFor(detector.kind)
     return Polygon(map).apply {
         points = when (val heading = detector.headingDegrees) {
             null -> Polygon.pointsAsCircle(
@@ -575,11 +695,29 @@ private fun wedge(center: LatLon, heading: Double, fovDegrees: Double, rangeMete
 
 private const val WEDGE_SEGMENTS = 16
 
-private fun detectorMarker(map: MapView, detector: Detector, onTap: (Detector) -> Unit): Marker =
+/**
+ * One device on the map.
+ *
+ * Three states rather than one colour per kind. Grey is behind the driver and can be
+ * ignored; the watched colour is ahead on the route and about to see the car; everything
+ * else keeps the colour of its kind, because it is background rather than a warning.
+ */
+private fun detectorMarker(
+    map: MapView,
+    detector: Detector,
+    onRoute: Boolean,
+    passed: Boolean,
+    onTap: (Detector) -> Unit,
+): Marker =
     Marker(map).apply {
         position = GeoPoint(detector.position.lat, detector.position.lon)
         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-        icon = tinted(map, R.drawable.ic_detector, colorFor(detector.kind).toArgb())
+        val tint = when {
+            passed -> ShadowColors.TextSecondary
+            onRoute -> ShadowColors.Watched
+            else -> colorFor(detector.kind)
+        }
+        icon = tinted(map, R.drawable.ic_detector, tint.toArgb())
         title = detector.describe()
         infoWindow = null
         setOnMarkerClickListener { _, _ ->

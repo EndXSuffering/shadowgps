@@ -157,6 +157,47 @@ data class MainUiState(
 
     /** Where a route would start from: an explicit pin, else wherever the driver is. */
     val effectiveOrigin: LatLon? get() = origin?.position ?: userFix?.position
+
+    /**
+     * The devices the chosen route actually goes past.
+     *
+     * Read off the route's own exposure report rather than out of [detectors], and that is
+     * the whole point: [detectors] is the map layer, and the map layer is trimmed to what
+     * is near the screen. While driving the screen is a few hundred metres of road, so the
+     * cameras further along the route — the ones a driver would want to see coming — were
+     * being thrown away as soon as the trip started. The route already knows exactly which
+     * devices it passes, and that list costs nothing to keep.
+     */
+    val routeDetectors: List<Detector>
+        get() = selectedRoute?.exposure?.encounters?.map { it.detector } ?: emptyList()
+
+    /** What the map should draw: the route's own devices, plus whatever else is in view. */
+    val mapDetectors: List<Detector>
+        get() {
+            val onRoute = routeDetectors
+            if (onRoute.isEmpty()) return detectors
+            return (onRoute + detectors).distinctBy { it.id }
+        }
+
+    /**
+     * Ids of the route's devices, for deciding how to draw each marker.
+     *
+     * A set rather than a list because the map compares this against the previous value to
+     * decide whether to rebuild its markers, and sets compare by content — so rebuilding
+     * this on every fix costs a comparison, not a redraw.
+     */
+    val routeDetectorIds: Set<String>
+        get() = selectedRoute?.exposure?.encounters?.mapTo(HashSet()) { it.detector.id } ?: emptySet()
+
+    /** Those already behind the driver, which are a record rather than a warning. */
+    val passedDetectorIds: Set<String>
+        get() {
+            val progress = navigation?.distanceAlongRouteMeters ?: return emptySet()
+            val encounters = selectedRoute?.exposure?.encounters ?: return emptySet()
+            return encounters
+                .filter { it.alongRouteMeters <= progress }
+                .mapTo(HashSet()) { it.detector.id }
+        }
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -335,7 +376,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             CarNavState(
                 graph = planner?.graph,
                 route = current.selectedRoute,
-                detectors = current.detectors,
+                // Same set the phone draws, so the route's own cameras survive on the car
+                // screen too rather than being trimmed away with the map layer.
+                detectors = current.mapDetectors,
                 vehiclePosition = current.navigation?.snappedPosition ?: current.userFix?.position,
                 vehicleHeadingDegrees = current.navigation?.routeHeadingDegrees
                     ?: current.userFix?.bearingDegrees,
