@@ -1,5 +1,6 @@
 package dev.shadowgps.app.data
 
+import kotlin.coroutines.cancellation.CancellationException
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorParser
 import dev.shadowgps.core.geo.BoundingBox
@@ -101,7 +102,7 @@ class MapDataRepository(
     ): AreaData? {
         val region = regions.regionCovering(trip = trip, preferred = preferred) ?: return null
         onStage(LoadStage.OPENING_SAVED)
-        return runCatching {
+        return try {
             val payload = regions.load(region)
             AreaData(
                 bounds = payload.metadata.bounds,
@@ -109,9 +110,16 @@ class MapDataRepository(
                 detectors = payload.detectors,
                 savedRegion = region,
             )
-        }.getOrElse {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             // A region that will not open is worse than none: drop it so the trip falls
             // through to a download instead of failing outright.
+            //
+            // Only for a failure of the file, though. This used to catch everything, so
+            // running short of memory while opening a large region — a passing condition
+            // the caller already knows how to recover from — permanently erased a map the
+            // user had downloaded on purpose for a trip without signal. Errors propagate.
             regions.delete(region.id)
             null
         }

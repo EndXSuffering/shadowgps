@@ -109,7 +109,11 @@ class CarMapRenderer {
         visible: BoundingBox,
         scale: Float,
     ) {
-        for (edge in graph.edges) {
+        // Through the graph's spatial index rather than every edge in it. A saved region can
+        // hold hundreds of thousands of directed edges, and this runs once per fix on the
+        // main thread; the index hands back only the few hundred near the screen.
+        for (edgeIndex in graph.edgesIntersecting(visible)) {
+            val edge = graph.edges[edgeIndex]
             // Each stretch of road is in the graph twice, once per direction; drawing the
             // reverse would double the work for identical pixels.
             if (edge.reverseIndex in 0 until edge.index) continue

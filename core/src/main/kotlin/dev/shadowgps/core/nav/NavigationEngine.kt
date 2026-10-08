@@ -162,7 +162,11 @@ class NavigationEngine(
             ?.let { (it.startAlongRouteMeters - maneuverAt).coerceAtLeast(0.0) }
             ?: 0.0
 
-        val justArrived = remaining <= config.arrivalMeters
+        // Near the end of the line is not enough: the end of the route also projects onto
+        // whatever the driver is level with, and a driver on the next street over, or past
+        // a missed final turn, is level with it too. Arriving means being near the end and
+        // actually on the road that leads there.
+        val justArrived = remaining <= config.arrivalMeters && deviation <= tolerance
         if (justArrived) arrived = true
 
         val ahead = route.exposure.encounters
@@ -252,7 +256,11 @@ class NavigationEngine(
         val step = nextStep ?: return null
         if (step.maneuver == Maneuver.ARRIVE && toManeuver > config.arrivalMeters * 4) return null
 
-        val trigger = config.maneuverAnnounceMeters.firstOrNull { toManeuver <= it } ?: return null
+        // The tightest threshold the driver is inside — not the first one in the list. The
+        // list runs far to near, so "first that applies" was always the farthest, whose
+        // prompt had already been spoken: each turn was announced once, a long way out, and
+        // never again as it came up.
+        val trigger = config.maneuverAnnounceMeters.filter { toManeuver <= it }.minOrNull() ?: return null
         val key = "maneuver:${step.startAlongRouteMeters.toInt()}:${trigger.toInt()}"
         speakOnce(key) ?: return null
 

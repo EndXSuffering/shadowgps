@@ -290,6 +290,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val passedDetectors = LinkedHashMap<String, DetectorKind>()
     private var tripStartedAtMillis = 0L
+    private var distanceBeforeThisRoute = 0.0
+    private var furthestOnThisRoute = 0.0
+    private var distanceEngine: NavigationEngine? = null
+
+    /**
+     * Planning that ends by installing guidance: a reroute, or the hand-over once the driver
+     * reaches a road. Tracked so stopping can call it off — left running, it finished after
+     * the trip had ended and put a route and a live engine back on a map that had just been
+     * cleared.
+     */
+    private var guidanceJob: Job? = null
 
     /** The camera-layer request in flight, so a newer one can supersede it. */
     private var detectorJob: Job? = null
@@ -348,10 +359,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 speedLimitKph = speedLimitAt(fix),
             )
         }
-        // Published before the early return so the car screen has a map to draw even when
-        // no trip is running — it shows the streets around the driver rather than nothing.
-        publishToCar()
-        if (_state.value.phase != Phase.NAVIGATING) return
+        // Published on every path, so the car screen has a map to draw even when no trip
+        // is running — but once per fix, and after guidance has been worked out where there
+        // is any. Publishing before as well drew every guided fix twice, the first time with
+        // the previous fix's instruction on it.
+        val engine = engine
+        if (_state.value.phase != Phase.NAVIGATING || engine == null) {
+            publishToCar()
+            if (_state.value.phase != Phase.NAVIGATING) return
+        }
 
         // Still making our own way to a start the router could reach.
         if (_state.value.awaitingJoin) {
@@ -359,11 +375,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val engine = engine ?: return
+        engine ?: return
 
         val navigation = engine.update(fix)
         rememberPassedDetectors(navigation)
-        tripDistanceMeters = maxOf(tripDistanceMeters, navigation.distanceAlongRouteMeters)
+        recordDistance(engine, navigation.distanceAlongRouteMeters)
         _state.update { it.copy(navigation = navigation) }
 
         announce(navigation)
@@ -882,6 +898,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startApproach(route: Route, provisional: ProvisionalStart, graph: RoadGraph) {
         engine = null
         joinWatcher = StartJoinWatcher(graph)
+        // A trip starts here, not when guidance does. Without this, a trip begun in a car
+        // park was summarised with the previous trip's cameras, distance and start time.
+        beginTrip()
         _state.update {
             it.copy(
                 phase = Phase.NAVIGATING,
@@ -889,6 +908,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 routes = listOf(route),
                 selectedRouteIndex = 0,
                 navigation = null,
+                tripSummary = null,
             )
         }
 
@@ -943,11 +963,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val settings = _state.value.settings
 
         joinWatcher = null
-        viewModelScope.launch {
+        guidanceJob?.cancel()
+        guidanceJob = viewModelScope.launch {
             _state.update { it.copy(isRerouting = true) }
             val plan = withContext(Dispatchers.Default) {
                 activePlanner.plan(position, destination, listOf(profile))
             }
+            if (!stillGuiding()) return@launch
 
             val route = plan.routes.firstOrNull()
             if (route == null) {
@@ -979,7 +1001,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Whether guidance is still wanted, checked after any wait. Cancelling the job is the
+     * first line; this catches the case where it had already resumed.
+     */
+    private fun stillGuiding(): Boolean =
+        _state.value.phase == Phase.NAVIGATING && _state.value.destination != null
+
     fun stopNavigation() {
+        guidanceJob?.cancel()
+        guidanceJob = null
         // Ending a trip early is still a trip, and the cameras behind the driver are still
         // behind them. Nothing to report on a trip that never got going, though.
         val summary = if (passedDetectors.isNotEmpty() || tripDistanceMeters > 0.0) {
@@ -1006,7 +1037,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun beginTrip() {
         passedDetectors.clear()
         tripDistanceMeters = 0.0
+        distanceBeforeThisRoute = 0.0
+        furthestOnThisRoute = 0.0
+        distanceEngine = null
         tripStartedAtMillis = System.currentTimeMillis()
+    }
+
+    /**
+     * Adds to the distance driven, across however many routes the trip took.
+     *
+     * Progress is measured along the current route, and a reroute starts a new one from
+     * zero. Taking the larger of the old total and the new progress, as this used to, threw
+     * away everything driven before the reroute until the new route had caught up — and
+     * since the new route starts where the old one was abandoned, it never did.
+     */
+    private fun recordDistance(engine: NavigationEngine, progressMeters: Double) {
+        if (engine !== distanceEngine) {
+            distanceEngine = engine
+            distanceBeforeThisRoute = tripDistanceMeters
+            furthestOnThisRoute = 0.0
+        }
+        // The furthest point reached, not the latest: progress can step back a metre or two
+        // on a noisy fix, and that is not the car reversing.
+        furthestOnThisRoute = maxOf(furthestOnThisRoute, progressMeters)
+        tripDistanceMeters = distanceBeforeThisRoute + furthestOnThisRoute
     }
 
     /** What the trip cost, counted from the devices actually driven past. */
@@ -1023,6 +1077,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private fun finishNavigation() {
+        guidanceJob?.cancel()
+        guidanceJob = null
         NavigationService.stop(getApplication())
         val summary = summariseTrip()
         engine = null
@@ -1057,7 +1113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val destination = _state.value.destination?.position ?: return
         lastRerouteAt = now
 
-        viewModelScope.launch {
+        guidanceJob?.cancel()
+        guidanceJob = viewModelScope.launch {
             _state.update { it.copy(isRerouting = true) }
             try {
                 val currentArea = area
@@ -1089,6 +1146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 val route = plan.routes.firstOrNull() ?: return@launch
+                if (!stillGuiding()) return@launch
                 engine = NavigationEngine(
                     route = route,
                     config = NavigationConfig(

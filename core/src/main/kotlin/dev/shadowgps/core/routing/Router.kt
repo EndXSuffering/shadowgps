@@ -173,7 +173,14 @@ class Router(
                 goalOffsets[edge.reverseIndex] = edge.lengthMeters - snap.alongMeters
             }
         }
-        val goalPoint = destinationSnaps.first().point
+        // The heuristic aims at the destination itself, discounted by how far the farthest
+        // arrival road lies from it. Arrival is accepted on any of several roads near the
+        // destination, so aiming at just one of them — as this did — overestimates the cost
+        // of finishing on another, and an overestimating heuristic lets the early exit
+        // below return a route that is not the cheapest. No arrival point is nearer a node
+        // than its distance to the destination less that slack, so this never overestimates,
+        // and it still costs one distance per node.
+        val goalSlackMeters = destinationSnaps.maxOf { haversineMeters(destination, it.point) }
 
         val edgeCount = graph.edgeCount
         val gScore = DoubleArray(edgeCount) { Double.POSITIVE_INFINITY }
@@ -215,7 +222,7 @@ class Router(
             if (cost < gScore[edgeIndex]) {
                 gScore[edgeIndex] = cost
                 cameFrom[edgeIndex] = START
-                heap.push(edgeIndex, cost + heuristic(edge.toNode, goalPoint))
+                heap.push(edgeIndex, cost + heuristic(edge.toNode, destination, goalSlackMeters))
             }
         }
 
@@ -228,7 +235,7 @@ class Router(
 
             // A stale duplicate left over from a since-improved push. Entries carry
             // `g + h`, so the comparison has to add the heuristic back on.
-            if (priority > cost + heuristic(edge.toNode, goalPoint) + EPSILON) continue
+            if (priority > cost + heuristic(edge.toNode, destination, goalSlackMeters) + EPSILON) continue
 
             // Nothing left in the queue can beat the best arrival found so far.
             if (priority >= bestGoalCost) break
@@ -270,7 +277,7 @@ class Router(
                 if (tentative + EPSILON < gScore[nextIndex]) {
                     gScore[nextIndex] = tentative
                     cameFrom[nextIndex] = edgeIndex
-                    heap.push(nextIndex, tentative + heuristic(next.toNode, goalPoint))
+                    heap.push(nextIndex, tentative + heuristic(next.toNode, destination, goalSlackMeters))
                 }
             }
         }
@@ -389,8 +396,8 @@ class Router(
      *
      * Never over-estimates the true remaining cost, which is what keeps A* optimal.
      */
-    private fun heuristic(node: Int, goal: LatLon): Double =
-        haversineMeters(graph.position(node), goal) / maxSpeedMetersPerSecond
+    private fun heuristic(node: Int, goal: LatLon, slackMeters: Double): Double =
+        (haversineMeters(graph.position(node), goal) - slackMeters).coerceAtLeast(0.0) / maxSpeedMetersPerSecond
 
     private companion object {
         const val UNVISITED = -1

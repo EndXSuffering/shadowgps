@@ -3,6 +3,7 @@ package dev.shadowgps.core
 import dev.shadowgps.core.format.Formatting
 import dev.shadowgps.core.format.UnitSystem
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.geo.bearingDegrees
 import dev.shadowgps.core.geo.coordsLengthMeters
 import dev.shadowgps.core.geo.destinationPoint
 import dev.shadowgps.core.geo.interpolateAlongCoords
@@ -358,5 +359,70 @@ class NavigationEngineTest {
 
         // Depart then arrive: the only thing after the next step is the end of the trip.
         assertEquals(null, state.followingStep)
+    }
+
+    /**
+     * Each turn gets its prompt at every configured distance, not only the first.
+     *
+     * The list runs far to near, and the engine used to take the first threshold the
+     * driver was inside — always the farthest, already spoken — so a turn was announced
+     * once, hundreds of metres out, and never again as it came up. The earlier test only
+     * checked that no prompt was repeated, which that bug passes.
+     */
+    @Test
+    fun `a turn is announced again as it comes up, not only from far out`() {
+        val route = RoutePlanner(grid, emptyList())
+            .plan(Fixtures.position(0, 0), Fixtures.position(3, 3), listOf(PrivacyProfile.FASTEST))
+            .routes.single()
+
+        val states = drive(NavigationEngine(route), route)
+
+        fun promptedWithin(meters: Double) = states.any { state ->
+            state.distanceToManeuverMeters <= meters &&
+                state.announcements.any { it.kind == Announcement.Kind.MANEUVER }
+        }
+        assertTrue(promptedWithin(60.0), "no prompt in the last 60 m before any manoeuvre")
+        assertTrue(
+            states.any { state ->
+                state.distanceToManeuverMeters in 60.0..200.0 &&
+                    state.announcements.any { it.kind == Announcement.Kind.MANEUVER }
+            },
+            "no prompt between 60 m and 200 m before any manoeuvre",
+        )
+    }
+
+    /**
+     * Level with the destination is not at it.
+     *
+     * The end of the route projects onto anything beside it, so a driver on the next street
+     * over — or past a missed final turn — was told they had arrived, and the trip ended
+     * with them still a block away.
+     */
+    @Test
+    fun `being level with the destination on another street is not arriving`() {
+        val route = RoutePlanner(grid, emptyList())
+            .plan(Fixtures.position(0, 0), Fixtures.position(3, 3), listOf(PrivacyProfile.FASTEST))
+            .routes.single()
+        val engine = NavigationEngine(route)
+        val coords = listToCoords(route.geometry)
+        val total = coordsLengthMeters(coords)
+        var time = 0L
+        fun fixAt(position: LatLon): NavigationState = engine.update(
+            PositionFix(position, speedMetersPerSecond = 12.0, accuracyMeters = 5.0, timestampMillis = time),
+        ).also { time += 2_000 }
+
+        var travelled = 0.0
+        while (travelled < total - 100.0) {
+            fixAt(interpolateAlongCoords(coords, travelled))
+            travelled += 25.0
+        }
+        val end = route.geometry.last()
+        val beforeEnd = route.geometry[route.geometry.size - 2]
+        val alongside = destinationPoint(end, bearingDegrees(beforeEnd, end) + 90.0, 150.0)
+
+        val state = fixAt(alongside)
+
+        assertFalse(state.hasArrived, "declared arrival 150 m from the route")
+        assertTrue(state.announcements.none { it.kind == Announcement.Kind.ARRIVAL })
     }
 }

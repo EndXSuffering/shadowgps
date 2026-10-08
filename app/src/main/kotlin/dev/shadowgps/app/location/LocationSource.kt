@@ -8,6 +8,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.nav.PositionFix
@@ -69,8 +70,21 @@ class LocationSource(private val context: Context) {
             return@callbackFlow
         }
 
+        // When GPS last reported, on the monotonic clock. While it is live, network fixes
+        // are dropped: they are tens to hundreds of metres out, and fed between GPS fixes
+        // they dragged the route progress back and forth — firing turn prompts early,
+        // jumping the banner, and near the end able to fake an arrival. Network is for the
+        // seconds before GPS has a fix, and for when it loses one.
+        var lastGpsAt = Long.MIN_VALUE / 2
+
         val listener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
+                val now = SystemClock.elapsedRealtime()
+                if (location.provider == LocationManager.GPS_PROVIDER) {
+                    lastGpsAt = now
+                } else if (now - lastGpsAt < GPS_FRESH_MILLIS) {
+                    return
+                }
                 trySend(location.toFix())
             }
 
@@ -111,4 +125,9 @@ class LocationSource(private val context: Context) {
         accuracyMeters = if (hasAccuracy()) accuracy.toDouble() else null,
         timestampMillis = time,
     )
+
+    private companion object {
+        /** How long a GPS fix keeps network fixes out. A few missed GPS intervals. */
+        const val GPS_FRESH_MILLIS = 10_000L
+    }
 }
