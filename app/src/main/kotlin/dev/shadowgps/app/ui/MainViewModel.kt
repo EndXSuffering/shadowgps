@@ -49,6 +49,7 @@ import dev.shadowgps.core.traffic.TrafficModel
 import java.time.LocalDateTime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -105,6 +106,9 @@ enum class Phase {
 
     NAVIGATING,
 }
+
+/** How far ahead on the route a device's coverage is drawn without being asked. */
+private const val UPCOMING_COVERAGE_METERS = 1_500.0
 
 data class MainUiState(
     val phase: Phase = Phase.BROWSING,
@@ -171,12 +175,18 @@ data class MainUiState(
     val routeDetectors: List<Detector>
         get() = selectedRoute?.exposure?.encounters?.map { it.detector } ?: emptyList()
 
-    /** What the map should draw: the route's own devices, plus whatever else is in view. */
+    /**
+     * What the map should draw: whatever is in view, plus the route's own devices.
+     *
+     * The layer's copy wins where both have one. The route's copy was frozen when the trip
+     * was planned, and a freshly loaded record — a corrected facing, a reclassified device
+     * — is the better description of what is actually standing there.
+     */
     val mapDetectors: List<Detector>
         get() {
             val onRoute = routeDetectors
             if (onRoute.isEmpty()) return detectors
-            return (onRoute + detectors).distinctBy { it.id }
+            return (detectors + onRoute).distinctBy { it.id }
         }
 
     /**
@@ -189,13 +199,36 @@ data class MainUiState(
     val routeDetectorIds: Set<String>
         get() = selectedRoute?.exposure?.encounters?.mapTo(HashSet()) { it.detector.id } ?: emptySet()
 
-    /** Those already behind the driver, which are a record rather than a warning. */
+    /**
+     * Those the driver has left out of reach, which are a record rather than a warning.
+     *
+     * Out of reach, not merely drawn level with: see [DetectorEncounter.isBehind]. Greying
+     * a plate reader the moment the car came alongside it told the driver to stop worrying
+     * about a device that was, quite often, still reading the plate.
+     */
     val passedDetectorIds: Set<String>
         get() {
             val progress = navigation?.distanceAlongRouteMeters ?: return emptySet()
             val encounters = selectedRoute?.exposure?.encounters ?: return emptySet()
             return encounters
-                .filter { it.alongRouteMeters <= progress }
+                .filter { it.isBehind(progress) }
+                .mapTo(HashSet()) { it.detector.id }
+        }
+
+    /**
+     * The route's devices close enough ahead to be worth showing their coverage for.
+     *
+     * Capped by distance rather than drawn for the whole route, because a long city trip
+     * can pass hundreds, and a coverage shape for each one would be hundreds of polygons
+     * redrawn every frame for devices the driver will not reach for half an hour. What is
+     * worth seeing is the shape of the next few, in the seconds before driving into them.
+     */
+    val upcomingDetectorIds: Set<String>
+        get() {
+            val progress = navigation?.distanceAlongRouteMeters ?: return emptySet()
+            val encounters = selectedRoute?.exposure?.encounters ?: return emptySet()
+            return encounters
+                .filter { !it.isBehind(progress) && it.alongRouteMeters <= progress + UPCOMING_COVERAGE_METERS }
                 .mapTo(HashSet()) { it.detector.id }
         }
 }
@@ -257,6 +290,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val passedDetectors = LinkedHashMap<String, DetectorKind>()
     private var tripStartedAtMillis = 0L
+
+    /** The camera-layer request in flight, so a newer one can supersede it. */
+    private var detectorJob: Job? = null
+
+    /** The area the camera layer was last fetched for, and the layer that fetch produced. */
+    private var detectorCoverage: BoundingBox? = null
+    private var detectorCoverageLayer: List<Detector>? = null
     private var tripDistanceMeters = 0.0
 
     init {
@@ -1067,25 +1107,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---------------------------------------------------------------- map layer
 
-    /** Loads the surveillance layer for whatever the map is currently showing. */
+    /**
+     * Loads the surveillance layer for whatever the map is currently showing.
+     *
+     * Fetches a margin beyond the view, and skips the fetch while the view stays inside the
+     * last one. The map reports where it is a little over once a second, and while driving
+     * at a close zoom every report is a new box a few hundred metres on from the last — so
+     * without the margin, each report outside a saved or already-loaded area was its own
+     * query to a shared, rate-limited public server, for a box overlapping the previous one
+     * almost entirely.
+     *
+     * A newer request also cancels an older one still in flight. Otherwise a slow answer for
+     * where the map *was* could land after a fast one for where it *is*, and replace the
+     * cameras around the driver with those around a spot they left a minute ago.
+     */
     fun loadDetectorsFor(box: BoundingBox) {
         // Remembered so "save this area" has something to save.
         _state.update { it.copy(viewport = box) }
         if (box.areaKm2 > DETECTOR_LAYER_MAX_KM2) return
-        viewModelScope.launch {
-            runCatching { repository.loadDetectors(box) }
-                .onSuccess { found ->
-                    _state.update { current ->
-                        // Every drawn detector is a marker plus a coverage shape, so the
-                        // set has to stay bounded — accumulating everything ever seen made
-                        // panning slower the longer the app had been open.
-                        val keep = box.expandMeters(DETECTOR_KEEP_MARGIN_METERS)
-                        val merged = (current.detectors + found)
-                            .distinctBy { it.id }
-                            .filter { keep.contains(it.position) }
-                        current.copy(detectors = merged)
-                    }
-                }
+
+        // Coverage is only good for the layer it was fetched into. Anything else that
+        // replaces the layer — a new plan, a reroute, a cleared trip — replaces the list,
+        // and then what was fetched before says nothing about what is on the map now.
+        val coverage = detectorCoverage
+        if (coverage != null && detectorCoverageLayer === _state.value.detectors && coverage.contains(box)) return
+
+        val fetch = box.expandMeters(DETECTOR_PREFETCH_METERS)
+        detectorJob?.cancel()
+        detectorJob = viewModelScope.launch {
+            val found = try {
+                repository.loadDetectors(fetch)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            _state.update { current ->
+                // Every drawn detector is a marker plus a coverage shape, so the set has
+                // to stay bounded — accumulating everything ever seen made panning slower
+                // the longer the app had been open. Trimmed around where the map is now,
+                // not where it was when this request set off.
+                val keep = (current.viewport ?: box).expandMeters(DETECTOR_KEEP_MARGIN_METERS)
+                val merged = (found + current.detectors)
+                    .distinctBy { it.id }
+                    .filter { keep.contains(it.position) }
+                current.copy(detectors = merged)
+            }
+            detectorCoverage = fetch
+            detectorCoverageLayer = _state.value.detectors
         }
     }
 
@@ -1231,5 +1300,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** How far outside the view to keep drawn cameras, so a small pan shows no gap. */
         const val DETECTOR_KEEP_MARGIN_METERS = 3_000.0
+
+        /**
+         * How far past the visible map the camera layer is fetched.
+         *
+         * Enough that a car driving at a close zoom stays inside one fetch for a minute or
+         * more, rather than leaving it every couple of seconds. Well inside the keep
+         * margin, so nothing fetched is trimmed straight back out.
+         */
+        const val DETECTOR_PREFETCH_METERS = 1_000.0
     }
 }

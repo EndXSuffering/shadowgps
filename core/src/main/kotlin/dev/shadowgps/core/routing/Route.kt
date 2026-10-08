@@ -83,7 +83,24 @@ data class DetectorEncounter(
     val alongRouteMeters: Double,
     /** Kind-scaled coverage, matching [ExposureModel]. */
     val weight: Double,
-)
+) {
+    /**
+     * Whether the driver, [progressMeters] into the route, is out of this device's reach.
+     *
+     * Not the same as having reached [alongRouteMeters]. That is the point of closest
+     * approach, and a plate reader does not stop reading there — many face the way traffic
+     * leaves, and see the car best as it pulls away. So a device counts as behind only once
+     * the car is beyond it by more than it can see, with a floor so a device of tiny range
+     * still does not flip state on the same fix the car draws level with it.
+     */
+    fun isBehind(progressMeters: Double): Boolean =
+        progressMeters > alongRouteMeters + maxOf(PASSED_MARGIN_METERS, detector.rangeMeters)
+
+    companion object {
+        /** The least distance past a device before it counts as behind. */
+        const val PASSED_MARGIN_METERS = 20.0
+    }
+}
 
 /** Everything that watched the trip. */
 @Serializable

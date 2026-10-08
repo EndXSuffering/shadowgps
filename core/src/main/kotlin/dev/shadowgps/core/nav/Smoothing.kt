@@ -95,6 +95,26 @@ const val HEADING_TIME_CONSTANT_SECONDS = 0.28
 /** How quickly the map closes in and pulls back out between framings. */
 const val ZOOM_TIME_CONSTANT_SECONDS = 0.45
 
+/*
+ * Settling.
+ *
+ * An exponential approach never quite arrives: each frame closes a fraction of the gap, so
+ * the gap shrinks forever without reaching zero. Left alone, the drawn position would keep
+ * creeping by fractions of a millimetre for a dozen seconds after the car stopped, and
+ * anything waiting for the map to come to rest — so it can stop drawing and let the phone
+ * sleep — would wait that whole time. Below these the remaining gap is invisible, so it is
+ * closed outright.
+ */
+
+/** Closer than this, the drawn position lands on the fix. A twentieth of a pixel at most. */
+const val SETTLE_DISTANCE_METERS = 0.05
+
+/** Closer than this, the drawn heading lands on the target. */
+const val SETTLE_DEGREES = 0.05
+
+/** Closer than this, the drawn zoom lands on the target. */
+const val SETTLE_ZOOM = 0.002
+
 /**
  * Past this, stop gliding and jump.
  *

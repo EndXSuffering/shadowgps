@@ -142,8 +142,12 @@ fun MapScreen(viewModel: MainViewModel) {
             overview = state.overview,
             metersToManeuver = state.navigation?.distanceToManeuverMeters,
             zoomForTurns = state.settings.zoomForTurns,
+            progressAlongRouteMeters = state.navigation
+                ?.takeIf { state.phase == Phase.NAVIGATING }
+                ?.distanceAlongRouteMeters,
             routeDetectorIds = state.routeDetectorIds,
             passedDetectorIds = state.passedDetectorIds,
+            upcomingDetectorIds = state.upcomingDetectorIds,
             onLongPress = { position -> pendingPin = position },
             onDetectorTapped = { detector -> tappedDetector = detector },
             onViewportChanged = viewModel::loadDetectorsFor,
