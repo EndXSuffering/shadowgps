@@ -4,11 +4,14 @@ import kotlinx.serialization.Serializable
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
+import java.util.Locale
 
 /** Mean Earth radius used by every distance calculation in the app. */
 const val EARTH_RADIUS_METERS: Double = 6_371_008.8
@@ -29,7 +32,7 @@ data class LatLon(val lat: Double, val lon: Double) {
         require(lon in -180.0..180.0) { "longitude out of range: $lon" }
     }
 
-    override fun toString(): String = "%.6f,%.6f".format(lat, lon)
+    override fun toString(): String = String.format(Locale.ROOT, "%.6f,%.6f", lat, lon)
 }
 
 /** Great-circle distance in metres. */
@@ -190,7 +193,34 @@ data class BoundingBox(
     }
 
     /** Overpass wants `south,west,north,east`. */
-    fun toOverpassString(): String = "%.6f,%.6f,%.6f,%.6f".format(south, west, north, east)
+    /**
+     * The box in Overpass's `(south,west,north,east)` order.
+     *
+     * Formatted for the root locale, never the phone's. With the device set to Spanish,
+     * German or French — any language that writes a decimal comma — the default formatting
+     * produced `29,400000,-98,500000,…`, which Overpass cannot parse, and every map download
+     * failed with nothing to tell the driver why.
+     */
+    fun toOverpassString(): String =
+        String.format(Locale.ROOT, "%.6f,%.6f,%.6f,%.6f", south, west, north, east)
+
+    /**
+     * This box grown outward to the nearest lines of a fixed grid.
+     *
+     * Two trips whose boxes differ by a few metres — the same commute started from a GPS fix
+     * that has wandered a little — then ask for exactly the same area. That is what lets a
+     * cached download be reused: the cache is keyed by the query, and a box built straight
+     * from a fix is never the same twice.
+     */
+    fun snappedOutward(cellDegrees: Double): BoundingBox {
+        require(cellDegrees > 0.0) { "cell size must be positive: $cellDegrees" }
+        return BoundingBox(
+            south = floor(south / cellDegrees) * cellDegrees,
+            west = floor(west / cellDegrees) * cellDegrees,
+            north = ceil(north / cellDegrees) * cellDegrees,
+            east = ceil(east / cellDegrees) * cellDegrees,
+        )
+    }
 
     companion object {
         fun of(points: Iterable<LatLon>): BoundingBox {

@@ -22,7 +22,8 @@ data class SavedPlace(
     val title: String get() = label ?: place.shortName
 
     /** Identity is the position, so the same address saved twice does not appear twice. */
-    val key: String get() = "%.5f,%.5f".format(place.position.lat, place.position.lon)
+    // Root locale, so a starred place stays starred when the phone's language changes.
+    val key: String get() = String.format(java.util.Locale.ROOT, "%.5f,%.5f", place.position.lat, place.position.lon)
 }
 
 @Serializable

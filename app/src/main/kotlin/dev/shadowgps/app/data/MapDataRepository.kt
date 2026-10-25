@@ -7,11 +7,14 @@ import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.graph.GraphBuilder
 import dev.shadowgps.core.graph.RoadGraph
+import dev.shadowgps.core.osm.OsmElement
 import dev.shadowgps.core.osm.OverpassQueries
 import dev.shadowgps.core.osm.parseOverpassResponse
 import dev.shadowgps.core.store.RegionMetadata
 import dev.shadowgps.core.store.RegionPayload
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.IOException
 
@@ -22,8 +25,30 @@ class AreaData(
     val detectors: List<Detector>,
     /** The saved region this came from, or null when it was downloaded for this trip. */
     val savedRegion: SavedRegion? = null,
+    /**
+     * Where this area has car parks and driveways, when it does not have them everywhere.
+     *
+     * A trip downloads those only around its two ends, so the same area is not enough for a
+     * later trip that starts or ends somewhere else in it. Null means everywhere: a saved
+     * region, fetched whole.
+     */
+    val serviceRoadAreas: List<BoundingBox>? = null,
 ) {
     val isOffline: Boolean get() = savedRegion != null
+
+    /** Whether the car parks and driveways around each of [points] are in this area. */
+    fun hasServiceRoadsAround(points: List<LatLon>): Boolean {
+        val areas = serviceRoadAreas ?: return true
+        return points.all { point ->
+            val near = BoundingBox.around(point, SERVICE_ROAD_MARGIN_METERS)
+            areas.any { it.contains(near) }
+        }
+    }
+
+    private companion object {
+        /** How much of a car park around an end has to be present to count as covered. */
+        const val SERVICE_ROAD_MARGIN_METERS = 300.0
+    }
 }
 
 /** Raised when the requested trip is too large to route on-device. */
@@ -62,13 +87,18 @@ class MapDataRepository(
     ): AreaData {
         val trip = BoundingBox.of(listOf(origin, destination))
         val padded = trip.expandMeters(paddingMeters)
+        val ends = listOf(origin, destination)
 
         // An area already in memory is reused when it holds enough map. A downloaded one
-        // has to cover the padded box, since that is all it ever fetched; a saved region
-        // only has to cover the trip, because the rest of the region is itself the padding.
+        // has to cover the padded box, since that is all it ever fetched, and have the car
+        // parks at both of this trip's ends; a saved region only has to cover the trip,
+        // because the rest of the region is itself the padding.
         cached?.let { area ->
-            val sufficient =
-                if (area.isOffline) area.bounds.contains(trip) else area.bounds.contains(padded)
+            val sufficient = if (area.isOffline) {
+                area.bounds.contains(trip)
+            } else {
+                area.bounds.contains(padded) && area.hasServiceRoadsAround(ends)
+            }
             if (sufficient) {
                 onStage(if (area.isOffline) LoadStage.OPENING_SAVED else LoadStage.READY)
                 return area
@@ -86,7 +116,7 @@ class MapDataRepository(
         if (padded.areaKm2 > maxAreaKm2) throw AreaTooLargeException(padded.areaKm2, maxAreaKm2)
 
         onStage(LoadStage.DOWNLOADING)
-        val area = load(padded)
+        val area = loadTrip(padded.snappedOutward(DOWNLOAD_GRID_DEGREES), ends)
         cached = area
         return area
     }
@@ -167,16 +197,72 @@ class MapDataRepository(
     /** Stages of a region download, for progress reporting. */
     enum class RegionProgress { ROADS, CAMERAS, BUILDING, SAVING }
 
-    /** Loads one explicit box, e.g. to show cameras around the map view. */
-    suspend fun load(box: BoundingBox): AreaData = withContext(Dispatchers.Default) {
-        val roadsJson = overpass.query(OverpassQueries.roadNetwork(box), ROAD_CACHE_MILLIS)
-        val surveillanceJson = overpass.query(OverpassQueries.surveillance(box), DETECTOR_CACHE_MILLIS)
+    /**
+     * Downloads what one trip needs: through roads across [box], every device in it, and
+     * the car parks and driveways around the trip's [ends].
+     *
+     * Three downloads, run as two lanes side by side. The through roads are by far the
+     * largest, so they get a lane to themselves; the cameras and the two ends' service roads
+     * are small and share the other. Each answer is parsed the moment it lands, while the
+     * other lane is still downloading. Public Overpass servers give each client a couple of
+     * slots, so two lanes is what fits — more would only queue, or be refused as busy.
+     *
+     * Service roads were part of the one big download until this. Across a whole trip's
+     * area they are no use — nobody's best route runs through a car park — but in an
+     * American city they are a large share of everything mapped: every parking aisle and
+     * driveway, each with dozens of points.
+     */
+    private suspend fun loadTrip(box: BoundingBox, ends: List<LatLon>): AreaData = coroutineScope {
+        val serviceAreas = ends
+            .map { BoundingBox.around(it, SERVICE_ROAD_RADIUS_METERS).snappedOutward(DOWNLOAD_GRID_DEGREES) }
+            .distinct()
 
-        val graph = GraphBuilder.build(parseOverpassResponse(roadsJson).elements)
-        val detectors = DetectorParser.parseAll(parseOverpassResponse(surveillanceJson).elements)
+        val throughRoads = async {
+            val json = overpass.query(
+                OverpassQueries.roadNetwork(box, includeService = false),
+                ROAD_CACHE_MILLIS,
+                isUsable = ::containsRoads,
+            )
+            withContext(Dispatchers.Default) { parseOverpassResponse(json).elements }
+        }
+        val camerasAndEnds = async {
+            val cameraJson = overpass.query(OverpassQueries.surveillance(box), DETECTOR_CACHE_MILLIS)
+            val detectors = withContext(Dispatchers.Default) {
+                DetectorParser.parseAll(parseOverpassResponse(cameraJson).elements)
+            }
+            // A trip can do without these — one that starts in a car park is then routed
+            // from the nearest road instead — so failing to get them is not worth failing
+            // the trip over. Recorded as covering nowhere, so the next trip tries again.
+            val service = try {
+                val json = overpass.query(OverpassQueries.serviceRoads(serviceAreas), ROAD_CACHE_MILLIS)
+                withContext(Dispatchers.Default) { parseOverpassResponse(json).elements } to serviceAreas
+            } catch (e: IOException) {
+                emptyList<OsmElement>() to emptyList()
+            }
+            detectors to service
+        }
 
-        AreaData(bounds = box, graph = graph, detectors = detectors)
+        val roads = throughRoads.await()
+        val (detectors, service) = camerasAndEnds.await()
+        val (serviceElements, coveredEnds) = service
+        withContext(Dispatchers.Default) {
+            AreaData(
+                bounds = box,
+                graph = GraphBuilder.build(roads + serviceElements),
+                detectors = detectors,
+                serviceRoadAreas = coveredEnds,
+            )
+        }
     }
+
+    /**
+     * Whether a road-network answer has any roads in it.
+     *
+     * A trip's area always does. One that comes back empty is a server that answered for
+     * somewhere else, or ran out of time without saying so — and caching it would make every
+     * route in the area look like open country for the next two weeks.
+     */
+    private fun containsRoads(json: String): Boolean = WAY_ELEMENT.containsMatchIn(json)
 
     /**
      * Just the surveillance layer for a box, without the road network.
@@ -236,6 +322,22 @@ class MapDataRepository(
          * memory when the region is opened.
          */
         const val MAX_REGION_AREA_KM2 = 12_000.0
+
+        /**
+         * The grid trip downloads are snapped to, in degrees — about a kilometre.
+         *
+         * The download cache is keyed by query, and a box built straight from a GPS fix is
+         * never the same twice, so the same commute downloaded the whole area afresh every
+         * day. Snapped, a start that has wandered a few metres asks for exactly the same
+         * area as last time, and gets it from the cache. Grows each side by half a cell on
+         * average, a few percent of a typical trip's area.
+         */
+        private const val DOWNLOAD_GRID_DEGREES = 0.01
+
+        /** How far around each end of a trip car parks and driveways are fetched. */
+        private const val SERVICE_ROAD_RADIUS_METERS = 1_000.0
+
+        private val WAY_ELEMENT = Regex("\"type\"\\s*:\\s*\"way\"")
 
         private const val ROAD_CACHE_MILLIS = 14L * 24 * 60 * 60 * 1000
         private const val DETECTOR_CACHE_MILLIS = 3L * 24 * 60 * 60 * 1000

@@ -29,9 +29,16 @@ class OverpassClient(
      * Runs an Overpass QL query, returning the raw JSON body.
      *
      * @param maxAgeMillis how stale a cached answer may be before it is refetched
+     * @param isUsable whether an answer can be believed. One that fails is never cached and
+     *   never returned: the next mirror is asked instead. This applies to cached answers too,
+     *   so one stored before the check existed cannot keep being served.
      */
-    suspend fun query(overpassQl: String, maxAgeMillis: Long): String = withContext(Dispatchers.IO) {
-        cache.read(overpassQl, maxAgeMillis)?.let { return@withContext it }
+    suspend fun query(
+        overpassQl: String,
+        maxAgeMillis: Long,
+        isUsable: (String) -> Boolean = { true },
+    ): String = withContext(Dispatchers.IO) {
+        cache.read(overpassQl, maxAgeMillis)?.takeIf(isUsable)?.let { return@withContext it }
 
         var lastError: Exception? = null
 
@@ -59,6 +66,10 @@ class OverpassClient(
                                 delay(BACKOFF_MILLIS * (attempt + 1))
                                 return@use
                             }
+                            if (!isUsable(text)) {
+                                lastError = OverpassException("Map data server returned nothing for this area")
+                                return@use
+                            }
                             cache.write(overpassQl, text)
                             return@withContext text
                         }
@@ -77,7 +88,7 @@ class OverpassClient(
         }
 
         // Nothing fresh could be had. A stale cached copy beats no map at all.
-        cache.read(overpassQl, maxAgeMillis = Long.MAX_VALUE)?.let { return@withContext it }
+        cache.read(overpassQl, maxAgeMillis = Long.MAX_VALUE)?.takeIf(isUsable)?.let { return@withContext it }
 
         throw OverpassException(
             "Could not download map data. Check your connection and try again.",
@@ -99,11 +110,17 @@ class OverpassClient(
     companion object {
         const val USER_AGENT = "ShadowGPS/0.1 (OpenStreetMap-based navigation)"
 
-        /** Public Overpass instances, tried in order. */
+        /**
+         * Public Overpass instances with worldwide data, tried in order.
+         *
+         * Worldwide matters. The third mirror used to be overpass.osm.ch, which holds
+         * Switzerland only: when the first two were busy, it answered a trip in Texas with a
+         * well-formed, empty map, which was then cached for two weeks as "no roads here".
+         */
         val DEFAULT_ENDPOINTS = listOf(
             "https://overpass-api.de/api/interpreter",
             "https://overpass.kumi.systems/api/interpreter",
-            "https://overpass.osm.ch/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter",
         )
 
         private const val BACKOFF_MILLIS = 800L

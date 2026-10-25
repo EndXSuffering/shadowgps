@@ -28,6 +28,11 @@ object GraphBuilder {
         val nodePositions = HashMap<Long, LatLon>()
         val nodeTags = HashMap<Long, Map<String, String>>()
         val ways = ArrayList<OsmElement>()
+        // A trip's map arrives in more than one download — through roads for the whole
+        // area, car parks around each end — and a way that crosses into both comes back in
+        // both. Built twice, it would be two identical roads on top of each other, and every
+        // node along it would look like a junction.
+        val seenWays = HashSet<Long>()
 
         for (element in elements) {
             when {
@@ -37,7 +42,7 @@ object GraphBuilder {
                     if (lat != null && lon != null) nodePositions[element.id] = LatLon(lat, lon)
                     if (element.tags.isNotEmpty()) nodeTags[element.id] = element.tags
                 }
-                element.isWay && isDrivable(element.tags) -> ways.add(element)
+                element.isWay && isDrivable(element.tags) && seenWays.add(element.id) -> ways.add(element)
             }
         }
 

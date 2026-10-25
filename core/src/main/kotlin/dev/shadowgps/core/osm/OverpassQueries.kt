@@ -23,24 +23,47 @@ object OverpassQueries {
 
     private val DRIVABLE_REGEX = "^(${DRIVABLE_HIGHWAY_VALUES.joinToString("|")})$"
 
+    private val THROUGH_ROAD_REGEX =
+        "^(${DRIVABLE_HIGHWAY_VALUES.filterNot { it == "service" }.joinToString("|")})$"
+
     /**
      * The road network inside [box].
      *
      * `out body` gives each way's node id list, `>` recurses down to those nodes and
      * `out skel qt` emits their coordinates. Junction nodes carry tags too (traffic
      * signals, stop signs), which the graph builder turns into crossing penalties.
+     *
+     * @param includeService whether to include `highway=service` — car-park aisles,
+     *   driveways, drive-throughs, alleys. Needed where a trip starts or ends, and nowhere
+     *   else: they are no part of any sensible through route, yet across a whole trip's
+     *   area in an American city they are a large share of everything mapped. A trip leaves
+     *   them out here and fetches them around its two ends with [serviceRoads]. A saved
+     *   region keeps them, since nobody knows yet where its trips will start.
      */
-    fun roadNetwork(box: BoundingBox, timeoutSeconds: Int = 90): String {
+    fun roadNetwork(box: BoundingBox, timeoutSeconds: Int = 90, includeService: Boolean = true): String {
         val bbox = box.toOverpassString()
+        val pattern = if (includeService) DRIVABLE_REGEX else THROUGH_ROAD_REGEX
         return """
             [out:json][timeout:$timeoutSeconds];
             (
-              way["highway"~"$DRIVABLE_REGEX"]["area"!~"yes"]($bbox);
+              way["highway"~"$pattern"]["area"!~"yes"]($bbox);
             );
             out body;
             >;
             out skel qt;
         """.trimIndent()
+    }
+
+    /**
+     * Just the `highway=service` roads inside each of [boxes]: the car parks and driveways
+     * at a trip's two ends, to go with a [roadNetwork] fetched without them.
+     */
+    fun serviceRoads(boxes: List<BoundingBox>, timeoutSeconds: Int = 60): String {
+        require(boxes.isNotEmpty()) { "no areas to fetch service roads for" }
+        val clauses = boxes.distinct().joinToString("\n") { box ->
+            """  way["highway"="service"]["area"!~"yes"](${box.toOverpassString()});"""
+        }
+        return "[out:json][timeout:$timeoutSeconds];\n(\n$clauses\n);\nout body;\n>;\nout skel qt;"
     }
 
     /**

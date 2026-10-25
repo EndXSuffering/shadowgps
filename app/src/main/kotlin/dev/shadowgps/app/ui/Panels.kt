@@ -625,7 +625,7 @@ private fun PlaceRow(
 
 /** Matches [dev.shadowgps.app.data.SavedPlace.key] so starred state lines up. */
 internal fun placeKey(place: Place): String =
-    "%.5f,%.5f".format(place.position.lat, place.position.lon)
+    String.format(java.util.Locale.ROOT, "%.5f,%.5f", place.position.lat, place.position.lon)
 
 /**
  * The route chooser.
