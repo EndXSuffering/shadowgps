@@ -1,6 +1,7 @@
 package dev.shadowgps.app.ui
 
 import android.Manifest
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.geo.LatLon
+import kotlinx.coroutines.delay
 
 /**
  * The whole app: a map with a search bar on top and a panel at the bottom whose contents
@@ -231,6 +234,15 @@ fun MapScreen(viewModel: MainViewModel) {
             }
 
             state.busyMessage?.let { message ->
+                // Seconds on this step. A spinner alone looks the same after five seconds as
+                // after five minutes, so a busy map server was indistinguishable from a hang.
+                val elapsedSeconds by produceState(0, message) {
+                    val startedAt = SystemClock.elapsedRealtime()
+                    while (true) {
+                        delay(1_000)
+                        value = ((SystemClock.elapsedRealtime() - startedAt) / 1_000).toInt()
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -244,13 +256,22 @@ fun MapScreen(viewModel: MainViewModel) {
                     ) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(12.dp))
-                        Text(
-                            message,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
+                        Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                            Text(
+                                if (elapsedSeconds >= 3) "$message  ${elapsedSeconds}s" else message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (elapsedSeconds >= SLOW_STEP_SECONDS) {
+                                Text(
+                                    "The map servers are slow right now. Still trying, and asking " +
+                                        "backup servers too.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                         // Downloading a large area on a poor connection can take minutes,
                         // and until this existed the only way out of it was to kill the app.
                         TextButton(onClick = viewModel::cancelWork) { Text("Cancel") }
@@ -591,3 +612,6 @@ private fun HintCard(granted: Boolean, enabled: Boolean, modifier: Modifier = Mo
         }
     }
 }
+
+/** How long one step may take before the busy card says the servers are being slow. */
+private const val SLOW_STEP_SECONDS = 20

@@ -26,15 +26,19 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        // Honour geo: links from other apps, so ShadowGPS can be the thing that opens when
+        // you tap an address elsewhere on the phone. Only on a fresh start: the activity
+        // keeps its launch intent through every recreation — a rotation, a theme change,
+        // coming back after Android reclaimed it — and acting on it each time re-picked the
+        // destination, throwing away the routes and any trip in progress. Links that
+        // arrive while the app is already open come through onNewIntent.
+        if (savedInstanceState == null) {
+            parseGeoIntent(intent)?.let { place -> model.chooseDestination(place) }
+        }
+
         setContent {
             ShadowGpsTheme {
                 val state by model.state.collectAsStateWithLifecycle()
-
-                // Honour geo: links from other apps, so ShadowGPS can be the thing that
-                // opens when you tap an address elsewhere on the phone.
-                LaunchedEffect(intent) {
-                    parseGeoIntent(intent)?.let { place -> model.chooseDestination(place) }
-                }
 
                 LaunchedEffect(state.phase, state.settings.keepScreenOnWhileNavigating) {
                     val keepOn = state.phase == Phase.NAVIGATING && state.settings.keepScreenOnWhileNavigating

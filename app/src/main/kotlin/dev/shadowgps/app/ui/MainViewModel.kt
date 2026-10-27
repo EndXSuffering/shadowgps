@@ -55,6 +55,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.Serializable
+import androidx.lifecycle.SavedStateHandle
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -233,7 +240,35 @@ data class MainUiState(
         }
 }
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+/**
+ * The part of a trip worth carrying across Android killing the app in the background.
+ *
+ * Small on purpose: it goes into the activity's saved state, which has a hard size limit,
+ * and everything else — the map, the routes — can be rebuilt from it, mostly out of the
+ * download cache.
+ */
+@Serializable
+private data class TripSnapshot(
+    val origin: Place? = null,
+    val destination: Place? = null,
+    val profileId: String? = null,
+    val navigating: Boolean = false,
+    val tripStartedAtMillis: Long = 0L,
+    val tripDistanceMeters: Double = 0.0,
+    val passed: Map<String, DetectorKind> = emptyMap(),
+)
+
+private val tripJson = Json { ignoreUnknownKeys = true }
+
+class MainViewModel(
+    application: Application,
+    /**
+     * Survives Android killing the app while it is in the background — which it does freely
+     * to a map app holding a road network in memory, and which used to send the driver back
+     * to an empty map, destination gone. Not kept when the driver closes the app themselves.
+     */
+    private val savedState: SavedStateHandle,
+) : AndroidViewModel(application) {
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -302,6 +337,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private var guidanceJob: Job? = null
 
+    /**
+     * A trip read back from saved state, waiting to be re-planned and picked up. Cleared once
+     * it has been, or as soon as the driver does anything that replaces it.
+     */
+    private var pendingRestore: TripSnapshot? = null
+
     /** The camera-layer request in flight, so a newer one can supersede it. */
     private var detectorJob: Job? = null
 
@@ -328,6 +369,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         refreshSavedRegions()
         refreshPermissionState()
+
     }
 
     // ---------------------------------------------------------------- location
@@ -359,6 +401,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 speedLimitKph = speedLimitAt(fix),
             )
         }
+        // A restored trip that starts from "my location" has been waiting for one.
+        resumeTripIfReady()
         // Published on every path, so the car screen has a map to draw even when no trip
         // is running — but once per fix, and after guidance has been worked out where there
         // is any. Publishing before as well drew every guided fix twice, the first time with
@@ -526,6 +570,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun chooseDestination(place: Place) {
+        pendingRestore = null
         _state.update {
             it.copy(
                 destination = place,
@@ -549,6 +594,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setOrigin(place: Place?) {
+        pendingRestore = null
         _state.update { it.copy(origin = place, routes = emptyList(), error = null) }
         if (_state.value.destination != null) planRoutes()
     }
@@ -578,6 +624,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearDestination() {
+        pendingRestore = null
         stopPlanning()
         joinWatcher = null
         _state.update {
@@ -605,6 +652,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * immediately is everything the user can see.
      */
     fun cancelWork() {
+        pendingRestore = null
         stopPlanning()
         searchJob?.cancel()
         _state.update {
@@ -636,6 +684,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * flight, in one action.
      */
     fun resetTrip() {
+        pendingRestore = null
         stopPlanning()
         searchJob?.cancel()
 
@@ -724,6 +773,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 if (plan.isEmpty) {
+                    pendingRestore = null
                     _state.update {
                         it.copy(
                             phase = Phase.BROWSING,
@@ -760,6 +810,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         routedOffline = loaded.isOffline,
                         traffic = plan.traffic,
                     )
+                }
+                pendingRestore?.let { snapshot ->
+                    pendingRestore = null
+                    resume(snapshot)
                 }
             } catch (e: AreaTooLargeException) {
                 fail("That trip covers ${e.areaKm2.toInt()} km², which is too much to route on the phone. Try a shorter journey.")
@@ -1329,16 +1383,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() = _state.update { it.copy(error = null) }
 
+    // ---------------------------------------------------------------- surviving the background
+
+    /** Reads back a trip Android interrupted by killing the app, if there was one. */
+    private fun restoreTrip() {
+        val snapshot = savedState.get<String>(TRIP_STATE_KEY)
+            ?.let { runCatching { tripJson.decodeFromString<TripSnapshot>(it) }.getOrNull() }
+            ?: return
+        val destination = snapshot.destination ?: return
+        pendingRestore = snapshot
+        _state.update {
+            it.copy(
+                // Mid-trip, the way on is from wherever the driver now is, not from a start
+                // picked before they set off.
+                origin = if (snapshot.navigating) null else snapshot.origin,
+                destination = destination,
+            )
+        }
+        resumeTripIfReady()
+    }
+
+    /** Re-plans a restored trip as soon as there is somewhere to plan it from. */
+    private fun resumeTripIfReady() {
+        if (pendingRestore == null || planJob?.isActive == true) return
+        if (_state.value.effectiveOrigin == null) return
+        planRoutes()
+    }
+
+    /** Puts a re-planned trip back the way the driver left it: same route, still going. */
+    private fun resume(snapshot: TripSnapshot) {
+        val index = _state.value.routes.indexOfFirst { it.profile.id == snapshot.profileId }
+        if (index >= 0) _state.update { it.copy(selectedRouteIndex = index) }
+        if (!snapshot.navigating) return
+
+        startNavigation()
+        // Starting navigation begins a fresh trip, but this one began earlier: carry over
+        // what it had already counted, so the summary at the end is of the whole drive.
+        if (snapshot.tripStartedAtMillis > 0L) tripStartedAtMillis = snapshot.tripStartedAtMillis
+        passedDetectors.putAll(snapshot.passed)
+        tripDistanceMeters = snapshot.tripDistanceMeters
+        // Measured from here on top of what was already driven.
+        distanceEngine = null
+    }
+
+    private fun snapshotOf(state: MainUiState): TripSnapshot {
+        // Until a restored trip has been picked back up, it is still the trip — a second
+        // kill before then must not lose it.
+        pendingRestore?.let { return it }
+        val navigating = state.phase == Phase.NAVIGATING
+        return TripSnapshot(
+            origin = state.origin,
+            destination = state.destination,
+            profileId = state.selectedRoute?.profile?.id,
+            navigating = navigating,
+            tripStartedAtMillis = if (navigating) tripStartedAtMillis else 0L,
+            tripDistanceMeters = if (navigating) tripDistanceMeters else 0.0,
+            passed = if (navigating) HashMap(passedDetectors) else emptyMap(),
+        )
+    }
+
     private fun showError(message: String) = _state.update { it.copy(error = message) }
 
-    private fun fail(message: String) = _state.update {
-        it.copy(phase = Phase.BROWSING, busyMessage = null, error = message)
+    private fun fail(message: String) {
+        pendingRestore = null
+        _state.update { it.copy(phase = Phase.BROWSING, busyMessage = null, error = message) }
     }
 
     override fun onCleared() {
         speaker.release()
         NavigationService.stop(getApplication())
         super.onCleared()
+    }
+
+    // Last in the class on purpose: picking a trip back up can start planning straight
+    // away, and planning reads fields that are only initialised once everything above has
+    // run — initialisers and init blocks go strictly in the order they are written.
+    init {
+        restoreTrip()
+        viewModelScope.launch {
+            _state.map(::snapshotOf).distinctUntilChanged().collect { snapshot ->
+                savedState[TRIP_STATE_KEY] = tripJson.encodeToString(snapshot)
+            }
+        }
     }
 
     private companion object {
@@ -1358,6 +1484,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         /** How far outside the view to keep drawn cameras, so a small pan shows no gap. */
         const val DETECTOR_KEEP_MARGIN_METERS = 3_000.0
+
+        const val TRIP_STATE_KEY = "trip"
 
         /**
          * How far past the visible map the camera layer is fetched.
