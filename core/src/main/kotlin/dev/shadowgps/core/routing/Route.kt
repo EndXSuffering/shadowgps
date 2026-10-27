@@ -183,11 +183,29 @@ data class ProvisionalStart(
 )
 
 /** The outcome of planning a trip across several profiles. */
+/**
+ * Where a route ends instead, when no road comes near enough to the destination.
+ *
+ * The usual cause is a destination in the middle of a large car park, apartment complex or
+ * campus whose private roads are not mapped, or did not download.
+ */
+data class ProvisionalEnd(
+    /** Where the driver asked to go. */
+    val requested: LatLon,
+    /** Where the route stops instead: the nearest point on a road. */
+    val arrivalPoint: LatLon,
+    /** Straight-line gap between the two. */
+    val distanceMeters: Double,
+    val roadName: String? = null,
+)
+
 data class RoutePlan(
     val routes: List<Route>,
     val failure: RouteFailure? = null,
     /** Set when the routes start away from the requested origin; null when they start at it. */
     val provisionalStart: ProvisionalStart? = null,
+    /** Set when the routes end away from the requested destination; null when they end at it. */
+    val provisionalEnd: ProvisionalEnd? = null,
     /** Conditions these routes were planned under. */
     val traffic: TrafficModel = TrafficModel.FREE_FLOW,
 ) {

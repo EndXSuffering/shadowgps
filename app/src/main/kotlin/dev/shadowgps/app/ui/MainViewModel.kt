@@ -37,6 +37,7 @@ import dev.shadowgps.core.nav.NavigationState
 import dev.shadowgps.core.nav.PositionFix
 import dev.shadowgps.core.nav.StartJoinWatcher
 import dev.shadowgps.core.routing.PrivacyProfile
+import dev.shadowgps.core.routing.ProvisionalEnd
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteFailure
@@ -139,6 +140,8 @@ data class MainUiState(
     val isRerouting: Boolean = false,
     /** Set when the route starts away from the driver, because nothing drivable is nearer. */
     val provisionalStart: ProvisionalStart? = null,
+    /** Set when the route ends at the nearest road because none reaches the destination. */
+    val provisionalEnd: ProvisionalEnd? = null,
     /** True while the driver makes their own way to that start and guidance waits. */
     val awaitingJoin: Boolean = false,
     /** Bumped to ask the map to jump back to the driver's position. */
@@ -635,6 +638,7 @@ class MainViewModel(
                 phase = Phase.BROWSING,
                 busyMessage = null,
                 provisionalStart = null,
+                provisionalEnd = null,
                 awaitingJoin = false,
             )
         }
@@ -707,6 +711,7 @@ class MainViewModel(
                 navigation = null,
                 isRerouting = false,
                 provisionalStart = null,
+                provisionalEnd = null,
                 awaitingJoin = false,
                 overview = false,
                 query = "",
@@ -769,6 +774,10 @@ class MainViewModel(
                         // the nearest one there is and pick guidance up on arrival. Capped
                         // to the downloaded padding, since roads beyond it are not loaded.
                         fallbackStartMeters = MapDataRepository.DEFAULT_PADDING_METERS,
+                        // A destination in the middle of a large car park or complex whose
+                        // private roads are unmapped — or did not download — ends at the
+                        // nearest road rather than failing the whole trip after the wait.
+                        fallbackEndMeters = DESTINATION_FALLBACK_METERS,
                     )
                 }
 
@@ -807,6 +816,7 @@ class MainViewModel(
                         selectedRouteIndex = preferred,
                         detectors = nearby,
                         provisionalStart = plan.provisionalStart,
+                        provisionalEnd = plan.provisionalEnd,
                         routedOffline = loaded.isOffline,
                         traffic = plan.traffic,
                     )
@@ -881,7 +891,8 @@ class MainViewModel(
                 "the map to set your starting point."
 
         RouteFailure.DESTINATION_UNREACHABLE ->
-            "No road found near that destination. Try a point closer to a street."
+            "No road found within a kilometre of that destination. The map data for it may " +
+                "be incomplete — try again, or long-press the map on the street you want."
 
         RouteFailure.SEARCH_EXHAUSTED -> "That trip is too complex to route on the phone."
         else -> "No route found between those two points."
@@ -1021,7 +1032,12 @@ class MainViewModel(
         guidanceJob = viewModelScope.launch {
             _state.update { it.copy(isRerouting = true) }
             val plan = withContext(Dispatchers.Default) {
-                activePlanner.plan(position, destination, listOf(profile))
+                activePlanner.plan(
+                    position,
+                    destination,
+                    listOf(profile),
+                    fallbackEndMeters = DESTINATION_FALLBACK_METERS,
+                )
             }
             if (!stillGuiding()) return@launch
 
@@ -1047,6 +1063,7 @@ class MainViewModel(
                     selectedRouteIndex = 0,
                     awaitingJoin = false,
                     provisionalStart = null,
+                    provisionalEnd = plan.provisionalEnd,
                     isRerouting = false,
                 )
             }
@@ -1144,6 +1161,7 @@ class MainViewModel(
                 destination = null,
                 routes = emptyList(),
                 provisionalStart = null,
+                provisionalEnd = null,
                 awaitingJoin = false,
                 overview = false,
                 tripSummary = summary,
@@ -1196,6 +1214,9 @@ class MainViewModel(
                         destination = destination,
                         profiles = listOf(profile),
                         originSnapMeters = SnapRadius.forAccuracy(fix.accuracyMeters),
+                        // The destination has not moved: if it needed a road nearby to end
+                        // on before, it still does after a wrong turn.
+                        fallbackEndMeters = DESTINATION_FALLBACK_METERS,
                     )
                 }
 
@@ -1208,7 +1229,14 @@ class MainViewModel(
                         announceDetectors = _state.value.settings.warnAboutCameras,
                     ),
                 )
-                _state.update { it.copy(routes = listOf(route), selectedRouteIndex = 0, detectors = area?.detectors ?: it.detectors) }
+                _state.update {
+                    it.copy(
+                        routes = listOf(route),
+                        selectedRouteIndex = 0,
+                        detectors = area?.detectors ?: it.detectors,
+                        provisionalEnd = plan.provisionalEnd,
+                    )
+                }
             } catch (e: IOException) {
                 // Keep guiding along the old line; the driver may rejoin it.
             } finally {
@@ -1486,6 +1514,9 @@ class MainViewModel(
         const val DETECTOR_KEEP_MARGIN_METERS = 3_000.0
 
         const val TRIP_STATE_KEY = "trip"
+
+        /** How far from a destination to look for a road to end on, when none is closer. */
+        const val DESTINATION_FALLBACK_METERS = 1_000.0
 
         /**
          * How far past the visible map the camera layer is fetched.

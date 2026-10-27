@@ -97,6 +97,7 @@ import dev.shadowgps.core.nav.NavigationState
 import dev.shadowgps.core.routing.Directions
 import dev.shadowgps.core.routing.Maneuver
 import dev.shadowgps.core.routing.PrivacyProfile
+import dev.shadowgps.core.routing.ProvisionalEnd
 import dev.shadowgps.core.routing.ProvisionalStart
 import dev.shadowgps.core.routing.Route
 import dev.shadowgps.core.routing.RouteStep
@@ -639,6 +640,8 @@ fun RouteChooser(
     selectedIndex: Int,
     units: UnitSystem,
     provisionalStart: ProvisionalStart?,
+    /** Set when the routes end at the nearest road rather than at the destination itself. */
+    provisionalEnd: ProvisionalEnd?,
     offline: Boolean,
     traffic: TrafficModel,
     onSelect: (Int) -> Unit,
@@ -686,6 +689,10 @@ fun RouteChooser(
 
             if (provisionalStart != null) {
                 DetachedStartNotice(provisionalStart, units)
+                Spacer(Modifier.height(12.dp))
+            }
+            if (provisionalEnd != null) {
+                DetachedEndNotice(provisionalEnd, units)
                 Spacer(Modifier.height(12.dp))
             }
 
@@ -874,6 +881,53 @@ private fun DetachedStartNotice(provisional: ProvisionalStart, units: UnitSystem
                         append(" away")
                         provisional.roadName?.let { append(" on $it") }
                         append(". Make your own way there and guidance will begin by itself.")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Says the routes stop short of the destination, and by how much.
+ *
+ * Without the fallback this replaced, a destination with no mapped road near it — the
+ * middle of a large car park or apartment complex — failed the whole trip after the
+ * download. Ending at the nearest road and saying so is the honest version of that.
+ */
+@Composable
+private fun DetachedEndNotice(provisional: ProvisionalEnd, units: UnitSystem) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ShadowColors.Caution.copy(alpha = 0.12f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(14.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                Icons.Rounded.Explore,
+                contentDescription = null,
+                tint = ShadowColors.Caution,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(
+                    "No road right at your destination",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = ShadowColors.Caution,
+                )
+                Text(
+                    buildString {
+                        append("These routes end at the nearest road")
+                        provisional.roadName?.let { append(", $it,") }
+                        append(" ")
+                        append(Formatting.distance(provisional.distanceMeters, units))
+                        append(" from it. The last stretch is up to you.")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

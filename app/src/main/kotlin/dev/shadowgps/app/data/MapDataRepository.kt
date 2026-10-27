@@ -5,6 +5,7 @@ import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.detect.DetectorParser
 import dev.shadowgps.core.geo.BoundingBox
 import dev.shadowgps.core.geo.LatLon
+import dev.shadowgps.core.geo.haversineMeters
 import dev.shadowgps.core.graph.GraphBuilder
 import dev.shadowgps.core.graph.RoadGraph
 import dev.shadowgps.core.osm.OsmElement
@@ -15,6 +16,7 @@ import dev.shadowgps.core.store.RegionPayload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.IOException
 
@@ -86,7 +88,7 @@ class MapDataRepository(
         onStage: (LoadStage) -> Unit = {},
     ): AreaData {
         val trip = BoundingBox.of(listOf(origin, destination))
-        val padded = trip.expandMeters(paddingMeters)
+        val padded = trip.expandMeters(paddingFor(origin, destination, paddingMeters))
         val ends = listOf(origin, destination)
 
         // An area already in memory is reused when it holds enough map. A downloaded one
@@ -230,16 +232,7 @@ class MapDataRepository(
             val detectors = withContext(Dispatchers.Default) {
                 DetectorParser.parseAll(parseOverpassResponse(cameraJson).elements)
             }
-            // A trip can do without these — one that starts in a car park is then routed
-            // from the nearest road instead — so failing to get them is not worth failing
-            // the trip over. Recorded as covering nowhere, so the next trip tries again.
-            val service = try {
-                val json = overpass.query(OverpassQueries.serviceRoads(serviceAreas), ROAD_CACHE_MILLIS)
-                withContext(Dispatchers.Default) { parseOverpassResponse(json).elements } to serviceAreas
-            } catch (e: IOException) {
-                emptyList<OsmElement>() to emptyList()
-            }
-            detectors to service
+            detectors to serviceRoadsAround(serviceAreas)
         }
 
         val roads = throughRoads.await()
@@ -254,6 +247,41 @@ class MapDataRepository(
             )
         }
     }
+
+    /**
+     * The car parks and driveways in [areas], and the areas they actually cover.
+     *
+     * A trip can do without these — one that starts or ends in a car park is then routed from
+     * or to the nearest road instead — so failing to get them is not worth failing the trip
+     * over. But going without is a worse trip, and the usual reason for failing is a busy
+     * server straight after the cameras were asked of it, so it is worth one more try once
+     * the server has had a moment. Recorded as covering nowhere if that fails too, so the next
+     * trip asks again.
+     */
+    private suspend fun serviceRoadsAround(areas: List<BoundingBox>): Pair<List<OsmElement>, List<BoundingBox>> {
+        repeat(SERVICE_ROAD_ATTEMPTS) { attempt ->
+            try {
+                val json = overpass.query(OverpassQueries.serviceRoads(areas), ROAD_CACHE_MILLIS)
+                return withContext(Dispatchers.Default) { parseOverpassResponse(json).elements } to areas
+            } catch (e: IOException) {
+                if (attempt < SERVICE_ROAD_ATTEMPTS - 1) delay(SERVICE_ROAD_RETRY_MILLIS)
+            }
+        }
+        return emptyList<OsmElement>() to emptyList()
+    }
+
+    /**
+     * How far past the trip itself to download.
+     *
+     * In proportion to the trip, within limits. A fixed three kilometres on every side was
+     * right for a long trip and wildly more than a short one could use: a two-kilometre trip
+     * downloaded an area nearly three times the size it needed, and the server takes longer
+     * the more area it has to gather. Never less than enough for the router to go round the
+     * block, nor for the fallback that ends a trip at the nearest road.
+     */
+    private fun paddingFor(origin: LatLon, destination: LatLon, maximum: Double): Double =
+        (haversineMeters(origin, destination) * PADDING_PER_TRIP_METER)
+            .coerceIn(minOf(MIN_PADDING_METERS, maximum), maximum)
 
     /**
      * Whether a road-network answer has any roads in it.
@@ -333,6 +361,15 @@ class MapDataRepository(
          * average, a few percent of a typical trip's area.
          */
         private const val DOWNLOAD_GRID_DEGREES = 0.01
+
+        /** Download margin per metre of trip, between the minimum and the default maximum. */
+        private const val PADDING_PER_TRIP_METER = 0.4
+
+        /** The least margin a trip is downloaded with. */
+        private const val MIN_PADDING_METERS = 1_500.0
+
+        private const val SERVICE_ROAD_ATTEMPTS = 2
+        private const val SERVICE_ROAD_RETRY_MILLIS = 3_000L
 
         /** How far around each end of a trip car parks and driveways are fetched. */
         private const val SERVICE_ROAD_RADIUS_METERS = 1_000.0

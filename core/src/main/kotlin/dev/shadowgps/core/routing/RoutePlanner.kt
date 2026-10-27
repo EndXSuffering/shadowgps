@@ -38,12 +38,15 @@ class RoutePlanner(
      * ones whose detour blows past [PrivacyProfile.maxDetourFactor] — a "private" option
      * that triples the journey is not an option, it is a joke, and showing it would bury
      * the ones that are actually usable.
-     */
-    /**
+     *
      * @param fallbackStartMeters how far to look for a road when nothing is within
      *   [originSnapMeters]. Non-zero turns an outright failure into a route that starts at
      *   the nearest reachable road, flagged through [RoutePlan.provisionalStart]. Zero
      *   keeps the strict behaviour.
+     * @param fallbackEndMeters the same for the destination: how far to look for a road to
+     *   finish on when none is within the normal snapping distance, flagged through
+     *   [RoutePlan.provisionalEnd]. Without it, a destination in the middle of a large car
+     *   park or complex failed outright, after the whole download.
      */
     fun plan(
         origin: LatLon,
@@ -51,27 +54,55 @@ class RoutePlanner(
         profiles: List<PrivacyProfile> = PrivacyProfile.entries,
         originSnapMeters: Double = SnapRadius.DEFAULT_METERS,
         fallbackStartMeters: Double = 0.0,
+        fallbackEndMeters: Double = 0.0,
     ): RoutePlan {
         val direct = planFrom(origin, destination, profiles, originSnapMeters)
 
-        // Only a start that is genuinely off the network is worth relocating. Every other
-        // failure — no map, unreachable destination, no path — would be misrepresented by
-        // silently moving the driver somewhere else.
-        if (direct.failure != RouteFailure.ORIGIN_UNREACHABLE) return direct
-        if (fallbackStartMeters <= originSnapMeters) return direct
+        var plan = direct
+        var start = origin
+        var startSnapMeters = originSnapMeters
+        var provisionalStart: ProvisionalStart? = null
+        var provisionalEnd: ProvisionalEnd? = null
 
-        val nearest = graph.snapNearest(origin, fallbackStartMeters) ?: return direct
-        val fromNearest = planFrom(nearest.point, destination, profiles, SnapRadius.DEFAULT_METERS)
-        if (fromNearest.isEmpty) return direct
+        // Only an end that is genuinely off the network is worth relocating. Every other
+        // failure — no map, no path — would be misrepresented by silently moving it.
+        if (plan.failure == RouteFailure.ORIGIN_UNREACHABLE && fallbackStartMeters > originSnapMeters) {
+            graph.snapNearest(origin, fallbackStartMeters)?.let { nearest ->
+                val fromNearest = planFrom(nearest.point, destination, profiles, SnapRadius.DEFAULT_METERS)
+                // Kept when it worked, and also when the only thing still wrong is the far
+                // end — which the next step may yet be able to fix.
+                if (!fromNearest.isEmpty || fromNearest.failure == RouteFailure.DESTINATION_UNREACHABLE) {
+                    plan = fromNearest
+                    start = nearest.point
+                    startSnapMeters = SnapRadius.DEFAULT_METERS
+                    provisionalStart = ProvisionalStart(
+                        requested = origin,
+                        joinPoint = nearest.point,
+                        distanceMeters = haversineMeters(origin, nearest.point),
+                        roadName = graph.edges[nearest.edgeIndex].displayName,
+                    )
+                }
+            }
+        }
 
-        return fromNearest.copy(
-            provisionalStart = ProvisionalStart(
-                requested = origin,
-                joinPoint = nearest.point,
-                distanceMeters = haversineMeters(origin, nearest.point),
-                roadName = graph.edges[nearest.edgeIndex].displayName,
-            ),
-        )
+        if (plan.failure == RouteFailure.DESTINATION_UNREACHABLE && fallbackEndMeters > SnapRadius.DEFAULT_METERS) {
+            graph.snapNearest(destination, fallbackEndMeters)?.let { nearest ->
+                val toNearest = planFrom(start, nearest.point, profiles, startSnapMeters)
+                if (!toNearest.isEmpty) {
+                    plan = toNearest
+                    provisionalEnd = ProvisionalEnd(
+                        requested = destination,
+                        arrivalPoint = nearest.point,
+                        distanceMeters = haversineMeters(destination, nearest.point),
+                        roadName = graph.edges[nearest.edgeIndex].displayName,
+                    )
+                }
+            }
+        }
+
+        // Nothing worked: report what was actually wrong with the trip as asked.
+        if (plan.isEmpty) return direct
+        return plan.copy(provisionalStart = provisionalStart, provisionalEnd = provisionalEnd)
     }
 
     /** Whether a trip could start from [point] without any help. */
