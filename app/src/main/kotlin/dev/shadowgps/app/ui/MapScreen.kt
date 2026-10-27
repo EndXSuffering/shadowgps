@@ -35,7 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -236,11 +236,12 @@ fun MapScreen(viewModel: MainViewModel) {
             state.busyMessage?.let { message ->
                 // Seconds on this step. A spinner alone looks the same after five seconds as
                 // after five minutes, so a busy map server was indistinguishable from a hang.
-                val elapsedSeconds by produceState(0, message) {
+                var elapsedSeconds by remember(message) { mutableIntStateOf(0) }
+                LaunchedEffect(message) {
                     val startedAt = SystemClock.elapsedRealtime()
                     while (true) {
                         delay(1_000)
-                        value = ((SystemClock.elapsedRealtime() - startedAt) / 1_000).toInt()
+                        elapsedSeconds = ((SystemClock.elapsedRealtime() - startedAt) / 1_000).toInt()
                     }
                 }
                 Spacer(Modifier.height(8.dp))
