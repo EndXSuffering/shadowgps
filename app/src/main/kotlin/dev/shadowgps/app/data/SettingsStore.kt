@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import dev.shadowgps.core.detect.DetectorKind
 import dev.shadowgps.core.format.UnitSystem
+import dev.shadowgps.core.geo.Daylight
+import dev.shadowgps.core.geo.LatLon
 import dev.shadowgps.core.routing.AvoidanceSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,13 +20,26 @@ import java.util.Locale
  * are drawn, so this costs no extra downloads and works on a saved map.
  */
 enum class MapTheme(val label: String, val description: String) {
+    AUTO("Auto", "Daylight colours by day, night colours after dark. Switches by itself."),
     DAY("Daylight", "Standard map colours."),
     DIM("Dimmed", "The same map, darkened for evening driving."),
     NIGHT("Night", "Inverted to dark, for driving after dark."),
     ;
 
     companion object {
-        fun fromName(name: String?): MapTheme = entries.firstOrNull { it.name == name } ?: DAY
+        fun fromName(name: String?): MapTheme = entries.firstOrNull { it.name == name } ?: AUTO
+
+        /**
+         * The theme to actually draw with, settling [AUTO] from where and when it is.
+         *
+         * With nowhere to work it out for — no fix yet, no map position — daylight, which
+         * is the right guess more hours of the day than not.
+         */
+        fun effective(chosen: MapTheme, position: LatLon?, nowMillis: Long): MapTheme = when {
+            chosen != AUTO -> chosen
+            position != null && Daylight.isDark(position, nowMillis) -> NIGHT
+            else -> DAY
+        }
     }
 }
 
@@ -37,7 +52,7 @@ data class AppSettings(
     val keepScreenOnWhileNavigating: Boolean = true,
     /** Draw every known device on the map, not only the ones being avoided. */
     val showAllDetectors: Boolean = true,
-    val mapTheme: MapTheme = MapTheme.DAY,
+    val mapTheme: MapTheme = MapTheme.AUTO,
     /**
      * Allow for typical congestion at the departure time.
      *

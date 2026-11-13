@@ -1398,21 +1398,22 @@ fun SettingsSheet(
                             .weight(1f)
                             .clickable { onUpdate { it.copy(mapTheme = theme) } },
                     ) {
-                        Column(Modifier.padding(10.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Rounded.Map,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = if (selected) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(theme.label, style = MaterialTheme.typography.labelLarge)
-                            }
+                        // Four across on a phone leaves room for the word and nothing else.
+                        Box(
+                            Modifier.padding(horizontal = 4.dp, vertical = 10.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                theme.label,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }

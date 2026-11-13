@@ -36,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.shadowgps.app.data.MapTheme
 import dev.shadowgps.core.detect.Detector
 import dev.shadowgps.core.geo.LatLon
 import kotlinx.coroutines.delay
@@ -125,6 +127,16 @@ fun MapScreen(viewModel: MainViewModel) {
         }
     }
 
+    // The time, as far as the map's day or night colours care: looked at once a minute, so
+    // the map goes dark at dusk even on a drive where nothing else on screen is changing.
+    var clockMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            clockMillis = System.currentTimeMillis()
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         MapCanvas(
             modifier = Modifier.fillMaxSize(),
@@ -138,7 +150,11 @@ fun MapScreen(viewModel: MainViewModel) {
             followUser = state.phase == Phase.NAVIGATING && !state.overview,
             showDetectorRanges = state.settings.showAllDetectors,
             recenterTick = state.recenterTick,
-            mapTheme = state.settings.mapTheme,
+            mapTheme = MapTheme.effective(
+                chosen = state.settings.mapTheme,
+                position = state.userFix?.position ?: state.viewport?.center,
+                nowMillis = clockMillis,
+            ),
             // While guiding, draw the route-matched position rather than the raw fix.
             vehiclePosition = state.navigation?.snappedPosition,
             vehicleHeadingDegrees = state.navigation?.routeHeadingDegrees,

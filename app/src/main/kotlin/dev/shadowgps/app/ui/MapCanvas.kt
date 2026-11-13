@@ -750,7 +750,8 @@ private const val FOLLOW_SCREEN_POSITION = 0.70f
  * second tile cache, and it works identically on a saved offline map.
  */
 private fun tileFilterFor(theme: MapTheme): ColorFilter? = when (theme) {
-    MapTheme.DAY -> null
+    // Auto is settled into day or night before it gets here; drawn plain if it ever is not.
+    MapTheme.AUTO, MapTheme.DAY -> null
 
     // Straight multiplicative dim: the same map, turned down.
     MapTheme.DIM -> ColorMatrixColorFilter(
