@@ -13,44 +13,45 @@ import dev.shadowgps.core.osm.OverpassQueries
 import dev.shadowgps.core.osm.parseOverpassResponse
 import dev.shadowgps.core.store.RegionMetadata
 import dev.shadowgps.core.store.RegionPayload
+import dev.shadowgps.core.store.StoredArea
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** A routable area: the road network plus everything watching it. */
 class AreaData(
     val bounds: BoundingBox,
     val graph: RoadGraph,
     val detectors: List<Detector>,
-    /** The saved region this came from, or null when it was downloaded for this trip. */
+    /** The stored region this came from, or null when it has only just been downloaded. */
     val savedRegion: SavedRegion? = null,
     /**
      * Where this area has car parks and driveways, when it does not have them everywhere.
      *
-     * A trip downloads those only around its two ends, so the same area is not enough for a
-     * later trip that starts or ends somewhere else in it. Null means everywhere: a saved
-     * region, fetched whole.
+     * A trip downloads those only around its two ends. Null means everywhere: an area
+     * fetched whole.
      */
     val serviceRoadAreas: List<BoundingBox>? = null,
+    /** When the cameras were fetched, which can be more recently than the roads. */
+    val camerasAtMillis: Long = System.currentTimeMillis(),
 ) {
+    /** Came off the phone's own storage rather than the network. */
     val isOffline: Boolean get() = savedRegion != null
 
-    /** Whether the car parks and driveways around each of [points] are in this area. */
-    fun hasServiceRoadsAround(points: List<LatLon>): Boolean {
-        val areas = serviceRoadAreas ?: return true
-        return points.all { point ->
-            val near = BoundingBox.around(point, SERVICE_ROAD_MARGIN_METERS)
-            areas.any { it.contains(near) }
-        }
-    }
+    private val coverage: StoredArea get() = StoredArea(bounds, serviceRoadAreas)
 
-    private companion object {
-        /** How much of a car park around an end has to be present to count as covered. */
-        const val SERVICE_ROAD_MARGIN_METERS = 300.0
-    }
+    /** Whether this area holds enough map to route a trip spanning [trip]. */
+    fun suffices(trip: BoundingBox, needed: BoundingBox): Boolean = coverage.suffices(trip, needed)
+
+    /** Whether the car parks and driveways around each of [points] are in this area. */
+    fun hasServiceRoadsAround(points: List<LatLon>): Boolean = coverage.hasServiceRoadsAround(points)
 }
 
 /** Raised when the requested trip is too large to route on-device. */
@@ -72,6 +73,22 @@ class MapDataRepository(
     @Volatile
     private var cached: AreaData? = null
 
+    /** For work that should outlive whoever asked for it, such as storing a finished download. */
+    private val background = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Called when the set of stored areas changes behind the caller's back. */
+    @Volatile
+    var onStoredAreasChanged: () -> Unit = {}
+
+    private val keepingLocalArea = AtomicBoolean(false)
+
+    @Volatile
+    private var lastLocalAttemptAt = 0L
+
+    /** Set when building the local area ran the phone out of memory; not tried again this run. */
+    @Volatile
+    private var localAreaTooBig = false
+
     /**
      * Loads everything needed to route between two points.
      *
@@ -87,52 +104,97 @@ class MapDataRepository(
         maxAreaKm2: Double = MAX_AREA_KM2,
         onStage: (LoadStage) -> Unit = {},
     ): AreaData {
-        val trip = BoundingBox.of(listOf(origin, destination))
-        val padded = trip.expandMeters(paddingFor(origin, destination, paddingMeters))
         val ends = listOf(origin, destination)
+        val trip = BoundingBox.of(ends)
+        val padding = paddingFor(origin, destination, paddingMeters)
+        val padded = trip.expandMeters(padding)
+        // What an area left behind by an earlier trip has to contain to be worth reusing:
+        // the trip, and enough around it to go round the block.
+        val needed = trip.expandMeters(minOf(padding, REUSE_MARGIN_METERS))
 
-        // An area already in memory is reused when it holds enough map. A downloaded one
-        // has to cover the padded box, since that is all it ever fetched, and have the car
-        // parks at both of this trip's ends; a saved region only has to cover the trip,
-        // because the rest of the region is itself the padding.
-        cached?.let { area ->
-            val sufficient = if (area.isOffline) {
-                area.bounds.contains(trip)
-            } else {
-                area.bounds.contains(padded) && area.hasServiceRoadsAround(ends)
-            }
-            if (sufficient) {
-                onStage(if (area.isOffline) LoadStage.OPENING_SAVED else LoadStage.READY)
-                return area
+        // Anything already on the phone beats the network, by a wide margin: opening a
+        // stored area takes a fraction of a second, and a download takes however long a
+        // volunteer-run server feels like. So the order is memory, then storage, and the
+        // network only when neither has the trip. An area that also has the car parks at
+        // both ends is preferred, but one without still wins over a download — the trip
+        // then starts or ends at the nearest street rather than inside the car park.
+        val inMemory = cached?.takeIf { it.suffices(trip, needed) }
+        if (inMemory != null && inMemory.hasServiceRoadsAround(ends)) return use(inMemory, onStage)
+
+        val stored = regions.regionCovering(trip = trip, preferred = padded, needed = needed, ends = ends)
+        val storedIsBetter = stored != null && stored.id != inMemory?.savedRegion?.id &&
+            (inMemory == null || stored.toStoredArea().hasServiceRoadsAround(ends))
+        if (stored != null && storedIsBetter) {
+            // Checked before the size guard: the limit exists because downloading and
+            // building a huge area on the phone is painful, and one that is already
+            // downloaded and already built is neither.
+            open(stored, onStage)?.let {
+                cached = it
+                return use(it, onStage)
             }
         }
-
-        // Saved regions are checked before the size guard: the limit exists because
-        // downloading and building a huge area on the phone is painful, and a region that
-        // is already downloaded and already built is neither.
-        loadFromSavedRegion(trip = trip, preferred = padded, onStage = onStage)?.let {
-            cached = it
-            return it
-        }
+        if (inMemory != null) return use(inMemory, onStage)
 
         if (padded.areaKm2 > maxAreaKm2) throw AreaTooLargeException(padded.areaKm2, maxAreaKm2)
 
         onStage(LoadStage.DOWNLOADING)
         val area = loadTrip(padded.snappedOutward(DOWNLOAD_GRID_DEGREES), ends)
         cached = area
+        keep(area)
         return area
+    }
+
+    private fun use(area: AreaData, onStage: (LoadStage) -> Unit): AreaData {
+        onStage(LoadStage.READY)
+        area.savedRegion?.let { region -> background.launch { regions.markUsed(region.id) } }
+        return area
+    }
+
+    /**
+     * Stores a freshly downloaded trip area, so the next trip inside it needs no download.
+     *
+     * In the built form, not as the text it arrived in: reopening it is a read, where the
+     * download cache would still have to be parsed and every junction rebuilt. Done in the
+     * background — the driver is waiting for routes, not for a file to be written.
+     */
+    private fun keep(area: AreaData) {
+        if (area.graph.isEmpty) return
+        background.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val saved = regions.save(
+                    id = "auto-trip-$now",
+                    name = TRIP_AREA_NAME,
+                    bounds = area.bounds,
+                    payload = RegionPayload(
+                        metadata = RegionMetadata(TRIP_AREA_NAME, area.bounds, now),
+                        graph = area.graph,
+                        detectors = area.detectors,
+                    ),
+                    automatic = true,
+                    serviceRoadAreas = area.serviceRoadAreas,
+                    camerasAtMillis = area.camerasAtMillis,
+                )
+                if (cached === area) {
+                    cached = AreaData(
+                        area.bounds, area.graph, area.detectors, saved, area.serviceRoadAreas, area.camerasAtMillis,
+                    )
+                }
+                regions.pruneAutomatic(MAX_AUTOMATIC_AREAS, AUTOMATIC_MAX_AGE_MILLIS)
+                onStoredAreasChanged()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Not being able to keep it costs a download next time, nothing more.
+            }
+        }
     }
 
     /** What [loadFor] is doing, so the screen can say something true about the wait. */
     enum class LoadStage { OPENING_SAVED, DOWNLOADING, READY }
 
-    /** Uses a saved region when one covers the trip, so it needs no network at all. */
-    private suspend fun loadFromSavedRegion(
-        trip: BoundingBox,
-        preferred: BoundingBox,
-        onStage: (LoadStage) -> Unit,
-    ): AreaData? {
-        val region = regions.regionCovering(trip = trip, preferred = preferred) ?: return null
+    /** Opens a stored area, or returns null — and drops it — when its file cannot be read. */
+    private suspend fun open(region: SavedRegion, onStage: (LoadStage) -> Unit = {}): AreaData? {
         onStage(LoadStage.OPENING_SAVED)
         return try {
             val payload = regions.load(region)
@@ -141,6 +203,8 @@ class MapDataRepository(
                 graph = payload.graph,
                 detectors = payload.detectors,
                 savedRegion = region,
+                serviceRoadAreas = region.serviceRoadAreas,
+                camerasAtMillis = region.camerasFetchedAtMillis,
             )
         } catch (e: CancellationException) {
             throw e
@@ -158,6 +222,138 @@ class MapDataRepository(
     }
 
     /**
+     * Gets the map around [position] into memory ahead of the first trip.
+     *
+     * Most trips start where the driver is. Opening the stored area for there as soon as
+     * there is a fix means that by the time a destination has been typed, the map is already
+     * loaded and the routes are a search away.
+     */
+    suspend fun warm(position: LatLon) {
+        val here = BoundingBox.around(position, WARM_COVER_METERS)
+        if (cached?.bounds?.contains(here) == true) return
+        val region = regions.regionCovering(
+            trip = here,
+            preferred = BoundingBox.around(position, LOCAL_COVER_METERS),
+            needed = here,
+            ends = listOf(position),
+        ) ?: return
+        try {
+            open(region)?.let { if (cached?.bounds?.contains(here) != true) cached = it }
+        } catch (e: OutOfMemoryError) {
+            // Only a head start. The trip itself will report it if memory is really short.
+            cached = null
+        }
+    }
+
+    /**
+     * Makes sure the area around [position] is stored on the phone, fetching it if not.
+     *
+     * This is what makes everyday trips quick: with the surroundings already on the phone,
+     * a trip inside them needs no download at all — and, as it happens, tells no server
+     * anything, not even roughly where it is going. Fetched whole, car parks included, once,
+     * in the background, and again when it is a couple of weeks old. A region the user saved
+     * themselves that covers the same ground counts, and is left alone.
+     *
+     * @return whether an area was stored
+     */
+    suspend fun keepAreaAround(position: LatLon): Boolean {
+        if (localAreaTooBig) return false
+        val now = System.currentTimeMillis()
+        if (now - lastLocalAttemptAt < LOCAL_RETRY_MILLIS) return false
+        if (!keepingLocalArea.compareAndSet(false, true)) return false
+        try {
+            val surroundings = BoundingBox.around(position, LOCAL_COVER_METERS)
+            val covering = regions.list().filter { it.serviceRoadAreas == null && it.bounds.contains(surroundings) }
+            if (covering.any { !it.automatic || now - it.downloadedAtMillis < LOCAL_REFRESH_MILLIS }) return false
+
+            lastLocalAttemptAt = now
+            // One that has merely gone stale is refreshed in place; it stays usable meanwhile.
+            val stale = covering.firstOrNull { it.automatic }
+            downloadRegion(
+                id = stale?.id ?: "auto-local-$now",
+                name = LOCAL_AREA_NAME,
+                box = stale?.bounds
+                    ?: BoundingBox.around(position, LOCAL_RADIUS_METERS).snappedOutward(DOWNLOAD_GRID_DEGREES),
+                automatic = true,
+            )
+            regions.pruneAutomatic(MAX_AUTOMATIC_AREAS, AUTOMATIC_MAX_AGE_MILLIS)
+            return true
+        } catch (e: IOException) {
+            // Busy servers, no signal. Tried again later; nothing depends on it.
+            return false
+        } catch (e: OutOfMemoryError) {
+            localAreaTooBig = true
+            cached = null
+            return false
+        } finally {
+            keepingLocalArea.set(false)
+        }
+    }
+
+    /**
+     * Brings the cameras in [area] up to date, when they are more than a few days old.
+     *
+     * Roads barely change from month to month; plate readers go up every week. A stored
+     * area would otherwise freeze the cameras at whenever it was fetched, which for an app
+     * about cameras is the wrong thing to let go stale. The camera list for an area is a
+     * small download next to its roads, so it is fetched again by itself and written back.
+     *
+     * @return the area with its new cameras when the set actually changed — in which case
+     *   routes planned on the old one deserve another look — or null when it did not, or
+     *   could not be checked
+     */
+    suspend fun freshenCameras(area: AreaData): AreaData? {
+        val now = System.currentTimeMillis()
+        if (now - area.camerasAtMillis < CAMERA_REFRESH_MILLIS) return null
+
+        val detectors = try {
+            val json = overpass.query(
+                OverpassQueries.surveillance(area.bounds, timeoutSeconds = 120),
+                DETECTOR_CACHE_MILLIS,
+            )
+            withContext(Dispatchers.Default) { DetectorParser.parseAll(parseOverpassResponse(json).elements) }
+        } catch (e: IOException) {
+            return null
+        }
+
+        var region = area.savedRegion
+        if (region != null) {
+            region = try {
+                regions.save(
+                    id = region.id,
+                    name = region.name,
+                    bounds = region.bounds,
+                    payload = RegionPayload(
+                        metadata = RegionMetadata(region.name, region.bounds, region.downloadedAtMillis),
+                        graph = area.graph,
+                        detectors = detectors,
+                    ),
+                    automatic = region.automatic,
+                    serviceRoadAreas = region.serviceRoadAreas,
+                    camerasAtMillis = now,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                region
+            }
+            onStoredAreasChanged()
+        }
+
+        val updated = AreaData(area.bounds, area.graph, detectors, region, area.serviceRoadAreas, now)
+        val current = cached
+        if (current === area || (region != null && current?.savedRegion?.id == region.id)) cached = updated
+        return updated.takeIf { detectors.toSet() != area.detectors.toSet() }
+    }
+
+    /** Removes every area the app kept by itself. Regions the user saved are left alone. */
+    suspend fun clearAutomaticAreas() {
+        regions.pruneAutomatic(keep = 0, maxAgeMillis = Long.MAX_VALUE)
+        cached = cached?.takeIf { it.savedRegion?.automatic != true }
+        lastLocalAttemptAt = 0L
+    }
+
+    /**
      * Downloads an area and stores it for offline use.
      *
      * @param onProgress reports which stage is running, for a screen the user is watching.
@@ -167,15 +363,27 @@ class MapDataRepository(
         name: String,
         box: BoundingBox,
         maxAreaKm2: Double = MAX_REGION_AREA_KM2,
+        automatic: Boolean = false,
         onProgress: (RegionProgress) -> Unit = {},
     ): SavedRegion {
         if (box.areaKm2 > maxAreaKm2) throw AreaTooLargeException(box.areaKm2, maxAreaKm2)
 
+        // Neither answer goes into the download cache: the region file is the copy that
+        // gets used, and the text it was built from is tens of megabytes nobody reads again.
         onProgress(RegionProgress.ROADS)
-        val roadsJson = overpass.query(OverpassQueries.roadNetwork(box, timeoutSeconds = 180), FRESH_ONLY)
+        val roadsJson = overpass.query(
+            OverpassQueries.roadNetwork(box, timeoutSeconds = 180),
+            FRESH_ONLY,
+            isUsable = ::containsRoads,
+            cacheResult = false,
+        )
 
         onProgress(RegionProgress.CAMERAS)
-        val surveillanceJson = overpass.query(OverpassQueries.surveillance(box, timeoutSeconds = 120), FRESH_ONLY)
+        val surveillanceJson = overpass.query(
+            OverpassQueries.surveillance(box, timeoutSeconds = 120),
+            FRESH_ONLY,
+            cacheResult = false,
+        )
 
         onProgress(RegionProgress.BUILDING)
         val payload = withContext(Dispatchers.Default) {
@@ -189,7 +397,7 @@ class MapDataRepository(
         }
 
         onProgress(RegionProgress.SAVING)
-        val saved = regions.save(id, name, box, payload)
+        val saved = regions.save(id, name, box, payload, automatic = automatic)
 
         // The freshly built graph is almost certainly what the next trip wants.
         cached = AreaData(box, payload.graph, payload.detectors, saved)
@@ -306,7 +514,7 @@ class MapDataRepository(
     suspend fun loadDetectors(box: BoundingBox): List<Detector> {
         detectorsFromMemory(box)?.let { return it }
 
-        loadFromSavedRegion(trip = box, preferred = box, onStage = {})?.let { area ->
+        regions.regionCovering(trip = box)?.let { region -> open(region) }?.let { area ->
             // Holding the region also means the trip planned from here needs no download.
             cached = area
             return area.detectors.filter { box.contains(it.position) }
@@ -361,6 +569,40 @@ class MapDataRepository(
          * average, a few percent of a typical trip's area.
          */
         private const val DOWNLOAD_GRID_DEGREES = 0.01
+
+        /**
+         * How much room past the trip an area left by an earlier trip must still have.
+         *
+         * Less than a trip is downloaded with, so the same commute from a start that has
+         * moved a street over still fits what the first one left behind.
+         */
+        private const val REUSE_MARGIN_METERS = 1_000.0
+
+        /** How far around the driver the automatically kept area reaches. */
+        private const val LOCAL_RADIUS_METERS = 6_000.0
+
+        /** How much of the driver's surroundings must already be stored to count as covered. */
+        private const val LOCAL_COVER_METERS = 2_500.0
+
+        private const val WARM_COVER_METERS = 300.0
+
+        /** The automatically kept area is fetched again once it is this old. */
+        private const val LOCAL_REFRESH_MILLIS = 14L * 24 * 60 * 60 * 1000
+
+        /** After a failed attempt at the local area, how long before another. */
+        private const val LOCAL_RETRY_MILLIS = 15L * 60 * 1000
+
+        /** Cameras older than this are fetched again when their area is used. */
+        private const val CAMERA_REFRESH_MILLIS = 3L * 24 * 60 * 60 * 1000
+
+        /** How many automatically kept areas there may be before the least used goes. */
+        private const val MAX_AUTOMATIC_AREAS = 12
+
+        /** An automatically kept area this old is dropped: its roads are due a fresh look. */
+        private const val AUTOMATIC_MAX_AGE_MILLIS = 45L * 24 * 60 * 60 * 1000
+
+        const val LOCAL_AREA_NAME = "Around you"
+        const val TRIP_AREA_NAME = "Recent trip"
 
         /** Download margin per metre of trip, between the minimum and the default maximum. */
         private const val PADDING_PER_TRIP_METER = 0.4

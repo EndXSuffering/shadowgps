@@ -12,6 +12,13 @@ import dev.shadowgps.core.traffic.CongestionLevel
 import dev.shadowgps.core.traffic.CongestionSpans
 import dev.shadowgps.core.traffic.TrafficModel
 import dev.shadowgps.core.traffic.TrafficTable
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Semaphore
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * Plans a trip several ways at once and reports what each one costs in time and exposure.
@@ -120,8 +127,12 @@ class RoutePlanner(
         var fastestSeconds: Double? = null
         val seenShapes = HashSet<List<Int>>()
 
-        for (profile in profiles) {
-            when (val result = router.route(origin, destination, profile.secondsPerDetector, originSnapMeters)) {
+        val results = searchAll(profiles) { profile ->
+            router.route(origin, destination, profile.secondsPerDetector, originSnapMeters)
+        }
+
+        for ((profile, result) in profiles.zip(results)) {
+            when (result) {
                 is RouteSearchResult.Failed -> {
                     if (firstFailure == null) firstFailure = result.reason
                 }
@@ -148,6 +159,55 @@ class RoutePlanner(
             failure = if (routes.isEmpty()) firstFailure ?: RouteFailure.NO_PATH else null,
             traffic = traffic,
         )
+    }
+
+    /**
+     * Runs one search per profile, side by side where the phone has the cores for it.
+     *
+     * The searches are independent — each reads the same graph and writes only its own
+     * working arrays — and they were the whole of the wait between having the map and
+     * showing the routes. Results come back in profile order whatever order they finish in,
+     * so everything downstream behaves exactly as it did when they ran in turn.
+     *
+     * A very large graph gets fewer at once: each search holds a few bytes per road for as
+     * long as it runs, and four of those across a saved region the size of a state is
+     * memory better spent on the map itself.
+     */
+    private fun searchAll(
+        profiles: List<PrivacyProfile>,
+        search: (PrivacyProfile) -> RouteSearchResult,
+    ): List<RouteSearchResult> {
+        val atOnce = minOf(
+            profiles.size,
+            SEARCH_THREADS,
+            if (graph.edgeCount > LARGE_GRAPH_EDGES) 2 else Int.MAX_VALUE,
+        )
+        if (atOnce <= 1) return profiles.map(search)
+
+        val gate = Semaphore(atOnce)
+        val pending = profiles.map { profile ->
+            searchPool.submit(
+                Callable {
+                    gate.acquire()
+                    try {
+                        search(profile)
+                    } finally {
+                        gate.release()
+                    }
+                },
+            )
+        }
+        try {
+            return pending.map { it.get() }
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        } catch (e: InterruptedException) {
+            // The caller gave up — a cancelled plan. Stop the searches still queued, and
+            // pass the interruption on.
+            pending.forEach { it.cancel(true) }
+            Thread.currentThread().interrupt()
+            throw e
+        }
     }
 
     /** Expands a raw edge chain into geometry, timings, instructions and an exposure report. */
@@ -279,5 +339,21 @@ class RoutePlanner(
 
         /** Time a u-turn really costs, as opposed to what the router is charged to avoid one. */
         const val U_TURN_REAL_SECONDS = 20.0
+
+        /** Searches run at once: one per profile, but leave a core for the screen. */
+        val SEARCH_THREADS: Int = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 4)
+
+        /** Past this many directed edges, searches run two at a time to hold memory down. */
+        const val LARGE_GRAPH_EDGES = 1_500_000
+
+        /**
+         * Shared by every planner, and made of daemon threads that retire when idle, so it
+         * costs nothing between trips and never keeps the process alive.
+         */
+        val searchPool: ExecutorService = ThreadPoolExecutor(
+            0, 4, 30L, TimeUnit.SECONDS, SynchronousQueue(),
+            { task -> Thread(task, "route-search").apply { isDaemon = true } },
+            ThreadPoolExecutor.CallerRunsPolicy(),
+        )
     }
 }

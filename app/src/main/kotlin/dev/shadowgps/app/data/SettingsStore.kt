@@ -8,6 +8,7 @@ import dev.shadowgps.core.routing.AvoidanceSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.Locale
 
 /**
  * How bright the map is drawn.
@@ -75,6 +76,13 @@ data class AppSettings(
      * a driver may well want either without the other.
      */
     val avoidTolls: Boolean = false,
+    /**
+     * Keep the map of the driver's surroundings on the phone, fetched in the background.
+     *
+     * What makes an everyday trip quick: with the area already stored, a trip inside it
+     * needs no download — and so tells no server anything about where it is going.
+     */
+    val keepLocalMap: Boolean = true,
 ) {
     fun toAvoidanceSettings(): AvoidanceSettings = AvoidanceSettings(enabledKinds = avoidedKinds)
 }
@@ -94,8 +102,13 @@ class SettingsStore(context: Context) {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
     fun update(transform: (AppSettings) -> AppSettings) {
-        val updated = transform(_settings.value)
+        val before = _settings.value
+        val updated = transform(before)
         write(updated)
+        // Only an actual change of units counts as choosing them. Every setting is written
+        // on every change, so without this, flipping any other switch would have recorded
+        // the default as though it were a decision.
+        if (updated.units != before.units) prefs.edit().putBoolean(KEY_UNITS_CHOSEN, true).apply()
         _settings.value = updated
     }
 
@@ -107,8 +120,15 @@ class SettingsStore(context: Context) {
                 ?.mapNotNull { name -> DetectorKind.entries.firstOrNull { it.name == name } }
                 ?.toSet()
                 ?: defaults.avoidedKinds,
-            units = runCatching { UnitSystem.valueOf(prefs.getString(KEY_UNITS, null) ?: "") }
-                .getOrDefault(defaults.units),
+            // Until the driver picks, follow where the phone is set up for: a speedometer in
+            // km/h is no use on a road signed in miles. The stored value only counts once it
+            // was actually chosen — it used to be written as metric alongside any other change.
+            units = if (prefs.getBoolean(KEY_UNITS_CHOSEN, false)) {
+                runCatching { UnitSystem.valueOf(prefs.getString(KEY_UNITS, null) ?: "") }
+                    .getOrDefault(unitsForRegion())
+            } else {
+                unitsForRegion()
+            },
             speakDirections = prefs.getBoolean(KEY_SPEAK, defaults.speakDirections),
             warnAboutCameras = prefs.getBoolean(KEY_WARN, defaults.warnAboutCameras),
             keepScreenOnWhileNavigating = prefs.getBoolean(KEY_SCREEN_ON, defaults.keepScreenOnWhileNavigating),
@@ -119,6 +139,7 @@ class SettingsStore(context: Context) {
             zoomForTurns = prefs.getBoolean(KEY_ZOOM_TURNS, defaults.zoomForTurns),
             showSpeedometer = prefs.getBoolean(KEY_SPEEDOMETER, defaults.showSpeedometer),
             avoidTolls = prefs.getBoolean(KEY_AVOID_TOLLS, defaults.avoidTolls),
+            keepLocalMap = prefs.getBoolean(KEY_LOCAL_MAP, defaults.keepLocalMap),
         )
     }
 
@@ -136,6 +157,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_ZOOM_TURNS, settings.zoomForTurns)
             .putBoolean(KEY_SPEEDOMETER, settings.showSpeedometer)
             .putBoolean(KEY_AVOID_TOLLS, settings.avoidTolls)
+            .putBoolean(KEY_LOCAL_MAP, settings.keepLocalMap)
             .apply()
     }
 
@@ -152,5 +174,17 @@ class SettingsStore(context: Context) {
         const val KEY_ZOOM_TURNS = "zoom_for_turns"
         const val KEY_SPEEDOMETER = "show_speedometer"
         const val KEY_AVOID_TOLLS = "avoid_tolls"
+        const val KEY_LOCAL_MAP = "keep_local_map"
+        const val KEY_UNITS_CHOSEN = "units_chosen"
+
+        /** Countries whose road signs are in miles. */
+        val MILES_COUNTRIES = setOf("US", "GB", "LR", "MM")
+
+        fun unitsForRegion(): UnitSystem =
+            if (Locale.getDefault().country.uppercase(Locale.ROOT) in MILES_COUNTRIES) {
+                UnitSystem.IMPERIAL
+            } else {
+                UnitSystem.METRIC
+            }
     }
 }

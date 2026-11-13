@@ -61,16 +61,21 @@ class RoadEdge(
     val endPoint: LatLon get() = coordAt(coords, pointCount - 1)
 
     /** Heading when entering the edge. */
-    val startHeading: Double by lazy(LazyThreadSafetyMode.NONE) {
+    // Publication-safe rather than unsynchronised, here and below. The graph is read from
+    // several threads at once — route searches side by side, the speed-limit lookup and the
+    // car screen on the main thread while a plan runs in the background — and an
+    // unsynchronised lazy can throw when two of them are first to ask for the same value.
+    // Computing one twice in a race is harmless; these are pure functions of the geometry.
+    val startHeading: Double by lazy(LazyThreadSafetyMode.PUBLICATION) {
         if (pointCount < 2) 0.0 else bearingDegrees(coordAt(coords, 0), coordAt(coords, 1))
     }
 
     /** Heading when leaving the edge. */
-    val endHeading: Double by lazy(LazyThreadSafetyMode.NONE) {
+    val endHeading: Double by lazy(LazyThreadSafetyMode.PUBLICATION) {
         if (pointCount < 2) 0.0 else bearingDegrees(coordAt(coords, pointCount - 2), coordAt(coords, pointCount - 1))
     }
 
-    val bounds: BoundingBox by lazy(LazyThreadSafetyMode.NONE) { coordsBounds(coords) }
+    val bounds: BoundingBox by lazy(LazyThreadSafetyMode.PUBLICATION) { coordsBounds(coords) }
 
     /**
      * Direction of travel over the first [meters] of the edge, rather than over its first
@@ -139,7 +144,7 @@ class RoadGraph internal constructor(
 ) {
     val edgeCount: Int get() = edges.size
 
-    val bounds: BoundingBox by lazy(LazyThreadSafetyMode.NONE) {
+    val bounds: BoundingBox by lazy(LazyThreadSafetyMode.PUBLICATION) {
         require(nodeCount > 0) { "empty graph has no bounds" }
         var box = BoundingBox(nodeLat[0], nodeLon[0], nodeLat[0], nodeLon[0])
         for (i in 1 until nodeCount) {
@@ -170,7 +175,8 @@ class RoadGraph internal constructor(
 
     @PublishedApi internal fun adjacencyEdgeAt(slot: Int): Int = adjacencyEdges[slot]
 
-    private val edgeIndexGrid: SpatialGrid<Int> by lazy(LazyThreadSafetyMode.NONE) {
+    // Synchronised: building it walks every edge, which is worth doing exactly once.
+    private val edgeIndexGrid: SpatialGrid<Int> by lazy {
         val grid = SpatialGrid<Int>(cellSizeDegrees = 0.004)
         for (edge in edges) grid.insert(edge.bounds, edge.index)
         grid

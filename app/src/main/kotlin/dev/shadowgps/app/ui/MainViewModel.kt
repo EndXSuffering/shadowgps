@@ -340,6 +340,12 @@ class MainViewModel(
      */
     private var guidanceJob: Job? = null
 
+    /** The background check that a stored area's cameras are still current. */
+    private var cameraJob: Job? = null
+
+    private var localMapJob: Job? = null
+    private var localMapCheckedAt: LatLon? = null
+
     /**
      * A trip read back from saved state, waiting to be re-planned and picked up. Cleared once
      * it has been, or as soon as the driver does anything that replaces it.
@@ -372,6 +378,7 @@ class MainViewModel(
         }
         refreshSavedRegions()
         refreshPermissionState()
+        repository.onStoredAreasChanged = ::refreshSavedRegions
 
     }
 
@@ -406,6 +413,7 @@ class MainViewModel(
         }
         // A restored trip that starts from "my location" has been waiting for one.
         resumeTripIfReady()
+        prepareLocalMap(fix.position)
         // Published on every path, so the car screen has a map to draw even when no trip
         // is running — but once per fix, and after guidance has been worked out where there
         // is any. Publishing before as well drew every guided fix twice, the first time with
@@ -589,10 +597,16 @@ class MainViewModel(
 
     /** Long-pressing the map drops a destination pin there. */
     fun chooseDestination(position: LatLon) {
+        // Plan first, name afterwards. Looking the address up is a network round trip, and
+        // waiting for it before starting on the routes put a second or more of nothing in
+        // front of every long-press — for a label.
+        val pin = Place(name = "Dropped pin", position = position)
+        chooseDestination(pin)
         viewModelScope.launch {
-            val place = geocoder.reverse(position)
-                ?: Place(name = "Dropped pin", position = position)
-            chooseDestination(place)
+            // The name of the place, at the point that was pressed: the address found may
+            // sit some way off it, and the routes already go to the pin.
+            val named = geocoder.reverse(position)?.copy(position = position) ?: return@launch
+            _state.update { if (it.destination === pin) it.copy(destination = named) else it }
         }
     }
 
@@ -623,6 +637,8 @@ class MainViewModel(
     private fun stopPlanning() {
         planJob?.cancel()
         planJob = null
+        cameraJob?.cancel()
+        cameraJob = null
         planGeneration++
     }
 
@@ -724,12 +740,20 @@ class MainViewModel(
 
     // ---------------------------------------------------------------- routing
 
-    fun planRoutes() {
+    fun planRoutes() = plan(quiet = false)
+
+    /**
+     * @param quiet re-plan behind routes already on screen, replacing them when done and
+     *   changing nothing if it fails. For when what the routes were planned on has changed
+     *   underneath them — fresher cameras — and the driver should not have to watch the
+     *   route list vanish and come back to find out.
+     */
+    private fun plan(quiet: Boolean) {
         val from = _state.value.effectiveOrigin
         val to = _state.value.destination?.position
 
         if (from == null) {
-            showError("Waiting for your location. Grant location access or set a starting point.")
+            if (!quiet) showError("Waiting for your location. Grant location access or set a starting point.")
             return
         }
         if (to == null) return
@@ -738,16 +762,19 @@ class MainViewModel(
         // state is how a cancelled plan comes back from the dead.
         stopPlanning()
         val generation = planGeneration
+        val keepProfile = _state.value.selectedRoute?.profile?.takeIf { quiet }
         planJob = viewModelScope.launch {
             // Deliberately neutral until the repository says which it is doing: claiming a
             // download while opening a saved map is exactly the bug this replaced.
-            _state.update { it.copy(phase = Phase.WORKING, busyMessage = "Preparing the map…", error = null) }
+            if (!quiet) {
+                _state.update { it.copy(phase = Phase.WORKING, busyMessage = "Preparing the map…", error = null) }
+            }
             try {
                 val loaded = withContext(Dispatchers.IO) {
                     repository.loadFor(from, to) { stage ->
-                        if (generation != planGeneration) return@loadFor
+                        if (generation != planGeneration || quiet) return@loadFor
                         val message = when (stage) {
-                            MapDataRepository.LoadStage.OPENING_SAVED -> "Opening your saved map…"
+                            MapDataRepository.LoadStage.OPENING_SAVED -> "Opening the map…"
                             MapDataRepository.LoadStage.DOWNLOADING -> "Downloading map data…"
                             MapDataRepository.LoadStage.READY -> null
                         }
@@ -756,7 +783,7 @@ class MainViewModel(
                 }
                 area = loaded
 
-                _state.update { it.copy(busyMessage = "Looking for a quiet way round…") }
+                if (!quiet) _state.update { it.copy(busyMessage = "Looking for a quiet way round…") }
                 val plan = withContext(Dispatchers.Default) {
                     val builtPlanner = RoutePlanner(
                         graph = loaded.graph,
@@ -781,6 +808,7 @@ class MainViewModel(
                     )
                 }
 
+                if (plan.isEmpty && quiet) return@launch
                 if (plan.isEmpty) {
                     pendingRestore = null
                     _state.update {
@@ -797,9 +825,12 @@ class MainViewModel(
                 // Default to the least-watched option rather than the quickest, because
                 // that is what the driver opened this app for. The planner has already
                 // thrown out anything with an absurd detour.
-                val preferred = plan.leastExposed
-                    ?.let { plan.routes.indexOf(it) }
+                val preferred = keepProfile
+                    ?.let { kept -> plan.routes.indexOfFirst { it.profile == kept } }
                     ?.takeIf { it >= 0 }
+                    ?: plan.leastExposed
+                        ?.let { plan.routes.indexOf(it) }
+                        ?.takeIf { it >= 0 }
                     ?: 0
 
                 // A saved region can hold thousands of devices, and each one drawn is a
@@ -825,14 +856,60 @@ class MainViewModel(
                     pendingRestore = null
                     resume(snapshot)
                 }
+                if (!quiet) freshenCamerasBehind(loaded, generation)
             } catch (e: AreaTooLargeException) {
-                fail("That trip covers ${e.areaKm2.toInt()} km², which is too much to route on the phone. Try a shorter journey.")
+                if (!quiet) fail("That trip covers ${e.areaKm2.toInt()} km², which is too much to route on the phone. Try a shorter journey.")
             } catch (e: IOException) {
-                fail(e.message ?: "Could not download map data.")
+                if (!quiet) fail(e.message ?: "Could not download map data.")
             } catch (e: OutOfMemoryError) {
                 repository.forget()
-                fail("Ran out of memory building the map for that area. Try a shorter journey.")
+                if (!quiet) fail("Ran out of memory building the map for that area. Try a shorter journey.")
             }
+        }
+    }
+
+    /**
+     * Checks the cameras the routes were just planned around are still the cameras there are.
+     *
+     * Routes come off the phone's own storage now, which is what makes them quick — and
+     * means the cameras in them are as old as the stored area. So the routes go up at once,
+     * and the camera list is fetched again behind them when it is more than a few days old.
+     * Usually nothing has changed. When something has, the routes are planned again on the
+     * new list and swapped in, provided the driver is still looking at the same choice.
+     */
+    private fun freshenCamerasBehind(planned: AreaData, generation: Int) {
+        cameraJob?.cancel()
+        cameraJob = viewModelScope.launch {
+            val fresher = repository.freshenCameras(planned) ?: return@launch
+            if (generation != planGeneration || _state.value.phase != Phase.CHOOSING) return@launch
+            area = fresher
+            // Planning again calls off whatever was planning before, this job included; by
+            // then it has nothing left to do.
+            cameraJob = null
+            plan(quiet = true)
+        }
+    }
+
+    /**
+     * Gets the map around the driver ready before they ask for a trip.
+     *
+     * Opens whatever is stored for here, so the first trip does not wait on it, and — unless
+     * switched off — makes sure there is something stored, fetching the surroundings in the
+     * background once and keeping them. Looked at again only after moving a fair way.
+     */
+    private fun prepareLocalMap(position: LatLon) {
+        if (localMapJob?.isActive == true) return
+        val checkedAt = localMapCheckedAt
+        if (checkedAt != null && haversineMeters(checkedAt, position) < LOCAL_MAP_RECHECK_METERS) return
+        // Not mid-trip: the map in memory is the trip's, and a download now would compete
+        // with a reroute for the same servers.
+        if (_state.value.phase != Phase.BROWSING) return
+        localMapCheckedAt = position
+
+        localMapJob = viewModelScope.launch {
+            repository.warm(position)
+            if (!_state.value.settings.keepLocalMap || _state.value.regionDownload != null) return@launch
+            if (repository.keepAreaAround(position)) refreshSavedRegions()
         }
     }
 
@@ -915,6 +992,9 @@ class MainViewModel(
 
     fun startNavigation() {
         val route = _state.value.selectedRoute ?: return
+        // Nothing still planning may land after this. A quiet re-plan finishing a moment
+        // after Start would otherwise put the route list back up over a trip in progress.
+        stopPlanning()
         _state.value.destination?.let(placeBook::remember)
         val settings = _state.value.settings
 
@@ -1402,6 +1482,12 @@ class MainViewModel(
         planner = null
         area = null
         _state.update { it.copy(detectors = emptyList(), routes = emptyList()) }
+        // The areas the app kept by itself are downloaded data too. Ones saved on purpose
+        // have their own delete buttons and are left alone.
+        viewModelScope.launch {
+            repository.clearAutomaticAreas()
+            refreshSavedRegions()
+        }
     }
 
     // ---------------------------------------------------------------- misc
@@ -1514,6 +1600,9 @@ class MainViewModel(
         const val DETECTOR_KEEP_MARGIN_METERS = 3_000.0
 
         const val TRIP_STATE_KEY = "trip"
+
+        /** How far the driver moves before the stored map for their surroundings is rechecked. */
+        const val LOCAL_MAP_RECHECK_METERS = 2_000.0
 
         /** How far from a destination to look for a road to end on, when none is closer. */
         const val DESTINATION_FALLBACK_METERS = 1_000.0

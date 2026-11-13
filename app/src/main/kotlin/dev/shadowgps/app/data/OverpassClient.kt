@@ -68,15 +68,20 @@ class OverpassClient(
      * @param isUsable whether an answer can be believed. One that fails is never cached and
      *   never returned: another mirror is asked instead. This applies to cached answers too,
      *   so one stored before the check existed cannot keep being served.
+     * @param cacheResult whether to keep the answer in the download cache. Off for a caller
+     *   that stores what it builds from the answer and will never ask for the text again.
      */
     suspend fun query(
         overpassQl: String,
         maxAgeMillis: Long,
         isUsable: (String) -> Boolean = { true },
+        cacheResult: Boolean = true,
     ): String {
-        withContext(Dispatchers.IO) { cache.read(overpassQl, maxAgeMillis)?.takeIf(isUsable) }
-            ?.let { return it }
-        return shared(overpassQl) { fetch(overpassQl, isUsable) }.await()
+        if (maxAgeMillis > 0L) {
+            withContext(Dispatchers.IO) { cache.read(overpassQl, maxAgeMillis)?.takeIf(isUsable) }
+                ?.let { return it }
+        }
+        return shared(overpassQl) { fetch(overpassQl, isUsable, cacheResult) }.await()
     }
 
     /** One download per query, however many callers are waiting for it. */
@@ -96,7 +101,7 @@ class OverpassClient(
         return existing ?: started.also { it.start() }
     }
 
-    private suspend fun fetch(overpassQl: String, isUsable: (String) -> Boolean): String {
+    private suspend fun fetch(overpassQl: String, isUsable: (String) -> Boolean, cacheResult: Boolean): String {
         val serverSeconds = SERVER_TIMEOUT.find(overpassQl)?.groupValues?.get(1)?.toLongOrNull()
             ?: DEFAULT_SERVER_TIMEOUT_SECONDS
         // A big query is slow even on a healthy server, so it gets longer before a second
@@ -105,7 +110,7 @@ class OverpassClient(
 
         return try {
             firstSuccessful(
-                sources = endpoints.map { endpoint -> suspend { attempt(endpoint, overpassQl, serverSeconds, isUsable) } },
+                sources = endpoints.map { endpoint -> suspend { attempt(endpoint, overpassQl, serverSeconds, isUsable, cacheResult) } },
                 hedgeAfterMillis = hedgeAfter,
             )
         } catch (e: IOException) {
@@ -128,6 +133,7 @@ class OverpassClient(
         overpassQl: String,
         serverSeconds: Long,
         isUsable: (String) -> Boolean,
+        cacheResult: Boolean,
     ): String {
         val request = Request.Builder()
             .url(endpoint)
@@ -148,7 +154,7 @@ class OverpassClient(
         failureRemarkIn(text)?.let { throw OverpassBusyException("Map data server overloaded: $it") }
         if (!isUsable(text)) throw OverpassException("Map data server returned nothing for this area")
 
-        cache.write(overpassQl, text)
+        if (cacheResult) cache.write(overpassQl, text)
         return text
     }
 

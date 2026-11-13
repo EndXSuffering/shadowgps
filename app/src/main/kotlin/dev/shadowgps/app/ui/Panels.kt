@@ -71,6 +71,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
@@ -667,7 +668,7 @@ fun RouteChooser(
                 if (offline) {
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "· from a saved map",
+                        "· no download needed",
                         style = MaterialTheme.typography.labelMedium,
                         color = ShadowColors.Clear,
                     )
@@ -1173,15 +1174,20 @@ fun NavigationFooter(
                     style = MaterialTheme.typography.titleLarge,
                 )
                 Text(
-                    Formatting.distance(navigation.distanceRemainingMeters, units) +
-                        " · " + remainingExposureLabel(navigation),
+                    "Arrive " + arrivalClock(navigation.secondsRemaining) + " · " +
+                        Formatting.distance(navigation.distanceRemainingMeters, units),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    "${route.profile.label} route",
+                    remainingExposureLabel(navigation).replaceFirstChar { it.uppercase() } +
+                        " · ${route.profile.label} route",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             // Looking over the route without abandoning the trip: guidance keeps running,
@@ -1201,6 +1207,19 @@ fun NavigationFooter(
             }
         }
     }
+}
+
+/**
+ * The time of day the trip ends, in the phone's own 12- or 24-hour style.
+ *
+ * "14 min" answers how long; this answers whether you will make it, which is the question
+ * people actually have while driving.
+ */
+@Composable
+private fun arrivalClock(secondsRemaining: Double): String {
+    val context = LocalContext.current
+    val arrival = System.currentTimeMillis() + (secondsRemaining * 1000).toLong()
+    return android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(arrival))
 }
 
 private fun remainingExposureLabel(navigation: NavigationState): String {
@@ -1239,6 +1258,15 @@ fun SettingsSheet(
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            SettingRow(
+                title = "Keep my area ready",
+                subtitle = "Stores the map around you in the background, so everyday trips " +
+                    "show routes at once — with nothing about them sent anywhere.",
+                checked = settings.keepLocalMap,
+                onCheckedChange = { on -> onUpdate { it.copy(keepLocalMap = on) } },
+            )
+            Spacer(Modifier.height(12.dp))
+
             OfflineMapsSection(
                 regions = savedRegions,
                 download = regionDownload,
@@ -1536,8 +1564,15 @@ private fun SavedRegionRow(region: SavedRegion, onRefresh: () -> Unit, onDelete:
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(region.name, style = MaterialTheme.typography.titleMedium)
+                    if (region.automatic) {
+                        Text(
+                            "Kept automatically",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(
-                        "${region.fileBytes / (1024 * 1024)} MB · " +
+                        "${sizeLabel(region.fileBytes)} · " +
                             "${region.roadCount / 2} roads · ${region.detectorCount} cameras",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1552,8 +1587,11 @@ private fun SavedRegionRow(region: SavedRegion, onRefresh: () -> Unit, onDelete:
                         color = if (stale) ShadowColors.Caution else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh ${region.name}")
+                // The app refreshes its own; only a region saved on purpose needs the button.
+                if (!region.automatic) {
+                    IconButton(onClick = onRefresh) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh ${region.name}")
+                    }
                 }
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Rounded.Delete, contentDescription = "Delete ${region.name}")
@@ -1572,6 +1610,10 @@ private fun SavedRegionRow(region: SavedRegion, onRefresh: () -> Unit, onDelete:
         }
     }
 }
+
+/** File size for the list: these are often under a megabyte, which should not read as "0 MB". */
+private fun sizeLabel(bytes: Long): String =
+    if (bytes < 1024 * 1024) "${(bytes / 1024).coerceAtLeast(1)} KB" else "${bytes / (1024 * 1024)} MB"
 
 private fun kindExplanation(kind: DetectorKind): String = when (kind) {
     DetectorKind.ALPR -> "Records your plate, time and place, and keeps it."
